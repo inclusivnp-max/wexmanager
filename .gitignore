@@ -1,0 +1,62 @@
+.gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### IntelliJ IDEA ###
+.idea/modules.xml
+.idea/jarRepositories.xml
+.idea/compiler.xml
+.idea/libraries/
+*.iws
+*.iml
+*.ipr
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+
+### Kotlin ###
+.kotlin
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
+### WEX Desktop ###
+# Готовые сборки и упакованные дистрибутивы (сотни мегабайт, пересобираются из исходников)
+/release/
+# Кэш Gradle этого проекта
+/.gradle/
+# Локальные настройки IDE; общие (стиль кода, кодировки) при желании можно добавлять руками
+/.idea/workspace.xml
+/.idea/tasks.xml
+/.idea/usage.statistics.xml
+/.idea/dictionaries/
+/.idea/shelf/
+# Чужие ключи подписи сюда попадать не должны: свои WEX держит в ~/.config/wexdesktop/keys.
+# Файлы app/src/main/resources/signing/testkey.* — это публичный тестовый ключ AOSP,
+# часть ресурсов программы, и они версионируются намеренно.
+*.jks
+*.keystore
+*.p12
