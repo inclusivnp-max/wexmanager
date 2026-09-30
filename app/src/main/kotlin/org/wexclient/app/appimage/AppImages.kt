@@ -5,6 +5,7 @@ import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import org.wexclient.app.util.frozen
 import androidx.compose.ui.res.loadSvgPainter
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
@@ -284,7 +285,7 @@ object AppImages {
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(bitmap), size) {
                 with(painter) { draw(size) }
             }
-            bitmap
+            bitmap.frozen()
         } else {
             org.wexclient.app.util.ImageScale.decodeScaled(bytes, sizePx)
         }

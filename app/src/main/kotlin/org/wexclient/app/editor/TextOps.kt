@@ -147,9 +147,9 @@ object TextOps {
 
     // ---------------- Ввод символов ----------------
 
-    private fun isQuote(c: Char) = c == '"' || c == '\'' || c == '`'
+    internal fun isQuote(c: Char) = c == '"' || c == '\'' || c == '`'
 
-    private fun pairCloser(cfg: EditConfig, c: Char): Char? {
+    internal fun pairCloser(cfg: EditConfig, c: Char): Char? {
         val pairs = cfg.language.autoPairs
         var i = 0
         while (i + 1 < pairs.length) {
@@ -159,7 +159,7 @@ object TextOps {
         return null
     }
 
-    private fun isPairCloser(cfg: EditConfig, c: Char): Boolean {
+    internal fun isPairCloser(cfg: EditConfig, c: Char): Boolean {
         val pairs = cfg.language.autoPairs
         var i = 1
         while (i < pairs.length) {

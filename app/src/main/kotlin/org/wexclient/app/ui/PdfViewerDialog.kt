@@ -53,7 +53,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import org.wexclient.app.util.frozen
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -187,7 +189,7 @@ fun PdfViewerDialog(entry: VfsEntry, onDismiss: () -> Unit) {
                 "Для показа PDF нужен пакет ${PdfTools.PACKAGE} — он даёт pdftoppm и pdftotext."
             )
             doc == null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = NoctaliaPrimary)
+                WexSpinner(color = NoctaliaPrimary)
             }
             doc.pages == 0 -> GrailEmptyState("В документе нет страниц — возможно, файл повреждён")
             tab == 1 -> PdfTextTab(path)
@@ -229,7 +231,7 @@ fun PdfViewerDialog(entry: VfsEntry, onDismiss: () -> Unit) {
                         )
                     }
                     if (searching) {
-                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = NoctaliaPrimary)
+                        WexSpinner(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = NoctaliaPrimary)
                         Spacer(modifier = Modifier.width(8.dp))
                     }
                     GrailSearchField(
@@ -306,10 +308,18 @@ private fun PdfPage(
     val image by produceState<ImageBitmap?>(null, path, page, dpi) {
         value = withContext(Dispatchers.IO) {
             val file = PdfTools.renderPage(path, page, dpi, cacheDir) ?: return@withContext null
+            // Промежуточную картинку Skia закрываем сразу: пиксели уже скопированы в ImageBitmap
             runCatching {
-                org.jetbrains.skia.Image.makeFromEncoded(file.readBytes()).toComposeImageBitmap()
+                org.jetbrains.skia.Image.makeFromEncoded(file.readBytes()).use { it.toComposeImageBitmap().frozen() }
             }.getOrNull()
         }
+    }
+    // Страница ушла с экрана или перерисована в другом разрешении — её пиксели закрываем сами: сборщик мусора
+    // нативную память не видит, и при прокрутке длинного PDF страницы по ~8 МБ копились сотнями.
+    // Уже записанные кадры держат свою ссылку на пиксели, так что закрытие их не ломает
+    androidx.compose.runtime.DisposableEffect(image) {
+        val shown = image
+        onDispose { shown?.let { runCatching { it.asSkiaBitmap().close() } } }
     }
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 14.dp)) {
         Surface(
@@ -324,7 +334,7 @@ private fun PdfPage(
                     modifier = Modifier.width(widthDp).height(heightDp).background(Color(0xFFF3F3F3)),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(modifier = Modifier.size(22.dp), color = NoctaliaPrimary)
+                    WexSpinner(modifier = Modifier.size(22.dp), color = NoctaliaPrimary)
                 }
             } else {
                 Image(
@@ -365,7 +375,7 @@ private fun PdfTextTab(path: Path) {
     val content = text
     when {
         content == null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = NoctaliaPrimary)
+            WexSpinner(color = NoctaliaPrimary)
         }
         content.isBlank() -> GrailEmptyState("Текстового слоя нет — похоже, страницы отсканированы картинками")
         else -> {

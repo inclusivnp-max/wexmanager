@@ -94,8 +94,8 @@ object ThemePreferences {
         adjusted.applyToGlobals()
         // Цвета ANSI в консоли — из той же темы
         org.wexclient.app.terminal.WexPalette.apply(appTheme)
-        // С фоновой картинкой панели могут быть полупрозрачными — она видна сквозь них
-        val opacity = if (BackgroundPreferences.hasImage) BackgroundPreferences.panelOpacity / 100f else 1f
+        // С фоновой картинкой или живым фоном панели могут быть полупрозрачными — фон виден сквозь них
+        val opacity = if (BackgroundPreferences.hasBackdrop) BackgroundPreferences.panelOpacity / 100f else 1f
         colorScheme = adjusted.toScheme(opacity)
         dynamicStamp = DynamicColors.stamp()
     }

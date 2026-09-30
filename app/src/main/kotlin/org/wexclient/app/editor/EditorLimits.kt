@@ -30,6 +30,9 @@ object EditorLimits {
     fun problem(text: CharSequence): String? = problem(text, MAX_LINES, MAX_LINE_CHARS)
 
     private fun problem(text: CharSequence, maxLines: Int, maxLineChars: Int): String? {
+        // Строк не больше, чем знаков плюс одна: короткий текст можно не просматривать. Редактор
+        // спрашивает это на каждую правку, и полный проход по мегабайтам шёл на каждую букву
+        if (text.length < maxLines && text.length <= maxLineChars) return null
         var lines = 1
         var longest = 0
         var start = 0

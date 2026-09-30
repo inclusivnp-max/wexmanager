@@ -127,8 +127,27 @@ fun MarkdownView(
     onOpenFile: ((Path) -> Unit)? = null
 ) {
     // Разбор не должен ронять окно: в худшем случае — исходный текст
-    val blocks = remember(text) { runCatching { Markdown.parse(text) }.getOrElse { listOf(MdBlock.Code("", text)) } }
+    val blocks = parsedInBackground(text) { runCatching { Markdown.parse(it) }.getOrElse { _ -> listOf(MdBlock.Code("", it)) } }
     MarkdownBlocksView(blocks, baseDir, modifier, onToggleTask, onOpenFile)
+}
+
+/** Больше этого разбираем не в потоке окна. */
+private const val SYNC_PARSE_CHARS = 32_000
+
+/**
+ * Разобранный текст. Небольшой — сразу, в этом же кадре (без пустого кадра); большой (README на
+ * мегабайт) — в фоне, а пока разбирается, виден прежний разбор: и открытие, и каждый щелчок по
+ * задаче раньше разбирали весь документ в потоке окна.
+ */
+@Composable
+internal fun parsedInBackground(text: String, parse: (String) -> List<MdBlock>): List<MdBlock> {
+    val latest = androidx.compose.runtime.rememberUpdatedState(parse)
+    if (text.length < SYNC_PARSE_CHARS) return remember(text) { parse(text) }
+    var shown by remember { androidx.compose.runtime.mutableStateOf<List<MdBlock>>(emptyList()) }
+    androidx.compose.runtime.LaunchedEffect(text) {
+        shown = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { latest.value(text) }
+    }
+    return shown
 }
 
 /** То же оформление для готовых блоков — им показывается и разобранная страница HTML. */
@@ -162,7 +181,7 @@ fun MarkdownBlocksView(
             // Наружу — только веб и почта: file://…/x.desktop, steam://, vscode:// и прочие
             // обработчики через xdg-open могли бы что-то запустить по одному щелчку
             isExternalLink(url) -> {
-                runCatching { ProcessBuilder("xdg-open", url).withUserEnv().start() }
+                runCatching { ProcessBuilder(org.wexclient.app.util.systemOpenCommand(url)).withUserEnv().start() }
             }
             url.startsWith("file:", ignoreCase = true) -> {
                 val path = MarkdownImages.resolve(url, baseDir)

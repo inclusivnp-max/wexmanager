@@ -38,6 +38,8 @@ data class TrashItem(
  */
 object Trash {
     private val NOFOLLOW = LinkOption.NOFOLLOW_LINKS
+    private val isWindows = java.io.File.separatorChar == '\\'
+    private const val WINDOWS_DRIVE_TRASH = ".Trash-wex"
 
     /** Растёт при каждом изменении корзины — счётчик на панели перечитывается. */
     var version by mutableStateOf(0)
@@ -86,6 +88,7 @@ object Trash {
     fun trashDirFor(path: Path): Path? {
         if (!supports(path)) return null
         val abs = path.toAbsolutePath().normalize()
+        if (isWindows) return windowsTrashDirFor(abs)
         val parent = abs.parent ?: return null
         val fileDev = device(parent) ?: return null
         val home = homeTrash()
@@ -99,6 +102,40 @@ object Trash {
         val candidates = if (sticky) listOf(shared.resolve(uid.toString()), top.resolve(".Trash-$uid")) else listOf(top.resolve(".Trash-$uid"))
         return candidates.firstOrNull { ensurePrivateDir(it) }
     }
+
+    /**
+     * Windows: номеров устройств и uid нет — раздел это диск. На диске с домашней папкой — домашняя
+     * корзина, на остальных — скрытая X:\.Trash-wex (перенос внутри диска мгновенный, как в spec).
+     */
+    private fun windowsTrashDirFor(abs: Path): Path? {
+        val root = abs.root ?: return null
+        val home = homeTrash()
+        if (root == home.root) return home
+        val dir = root.resolve(WINDOWS_DRIVE_TRASH)
+        val ok = runCatching {
+            if (!Files.isDirectory(dir, NOFOLLOW)) {
+                Files.createDirectory(dir)
+                runCatching { Files.setAttribute(dir, "dos:hidden", true) }
+            }
+            Files.isWritable(dir)
+        }.getOrDefault(false)
+        if (!ok) return null
+        windowsDriveTrashes.add(dir)
+        return dir
+    }
+
+    /** Корзины дисков Windows: найденные при первом обращении и созданные с тех пор. */
+    private val windowsDriveTrashes: MutableSet<Path> by lazy {
+        val found = FileSystems.getDefault().rootDirectories.map { it.resolve(WINDOWS_DRIVE_TRASH) }
+            .filter { runCatching { Files.isDirectory(it.resolve("info"), NOFOLLOW) }.getOrDefault(false) }
+        java.util.concurrent.ConcurrentHashMap.newKeySet<Path>().apply { addAll(found) }
+    }
+
+    /** Настоящая папка, не ссылка и не junction: подменённая корзина на флешке не должна вести наружу. */
+    private fun plainDir(d: Path): Boolean = runCatching {
+        val a = Files.readAttributes(d, java.nio.file.attribute.BasicFileAttributes::class.java, NOFOLLOW)
+        a.isDirectory && !a.isSymbolicLink && !a.isOther
+    }.getOrDefault(false)
 
     private fun ensurePrivateDir(dir: Path): Boolean = runCatching {
         if (!Files.isDirectory(dir, NOFOLLOW)) {
@@ -114,6 +151,7 @@ object Trash {
      */
     internal fun trusted(dir: Path): Boolean {
         if (topOf(dir) == null) return true // домашняя корзина — своя
+        if (isWindows) return listOf(dir, dir.resolve("files"), dir.resolve("info")).all(::plainDir)
         return runCatching {
             val shared = dir.parent?.takeIf { it.fileName?.toString() == ".Trash" }
             if (shared != null && !Files.isDirectory(shared, NOFOLLOW)) return false
@@ -214,6 +252,10 @@ object Trash {
         out.add(homeTrash())
         // Тесты подменяют домашнюю папку, а корзины разделов — настоящие: «очистка» в тестах их не трогает
         if (System.getProperty("wex.isolated") == "true") return out.toList()
+        if (isWindows) {
+            windowsDriveTrashes.filterTo(out) { Files.isDirectory(it.resolve("info"), NOFOLLOW) && trusted(it) }
+            return out.toList()
+        }
         runCatching {
             Files.readAllLines(Paths.get("/proc/self/mounts")).mapNotNull { line ->
                 line.split(' ').getOrNull(1)?.replace("\\040", " ")?.let { Paths.get(it) }
@@ -372,7 +414,9 @@ object Trash {
 
     private fun deleteTree(p: Path) {
         if (!Files.exists(p, NOFOLLOW)) return
-        if (Files.isDirectory(p, NOFOLLOW)) {
+        if (isWindows && Files.isDirectory(p, NOFOLLOW)) {
+            org.wexclient.app.util.FileTree.deleteOrThrow(p)
+        } else if (Files.isDirectory(p, NOFOLLOW)) {
             Files.walk(p).use { s -> s.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
         } else {
             Files.deleteIfExists(p)

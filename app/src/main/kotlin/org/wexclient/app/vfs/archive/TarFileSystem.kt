@@ -163,7 +163,9 @@ class TarFileSystem internal constructor(
     private var open = true
     private var dirty = false
 
-    internal val root = Node("", NodeKind.DIR)
+    // close() заменяет пустым: закрытую ФС ещё держат старые Path из панелей, а дерево — ~250 Б на запись
+    internal var root = Node("", NodeKind.DIR)
+        private set
     internal val rootPath = TarPath(this, "/")
     private val store = TarFileStore(this)
 
@@ -792,6 +794,8 @@ class TarFileSystem internal constructor(
                 if (baseIsTemp) base?.let { runCatching { Files.deleteIfExists(it) } }
                 tempFiles.forEach { runCatching { Files.deleteIfExists(it) } }
                 tempFiles.clear()
+                // Дерево больше не нужно: все операции сначала проверяют ensureOpen()
+                root = Node("", NodeKind.DIR)
             }
         }
     }

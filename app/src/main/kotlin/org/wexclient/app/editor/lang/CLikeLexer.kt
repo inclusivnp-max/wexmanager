@@ -27,7 +27,14 @@ data class StringRule(
     val doubledQuoteEscape: Boolean = false
 )
 
-data class BlockComment(val open: String, val close: String, val doc: Boolean = false, val nested: Boolean = false)
+/** [lineStart] — открывается только с начала строки (=begin в Ruby, POD в Perl): «x=begin_at» — код. */
+data class BlockComment(
+    val open: String,
+    val close: String,
+    val doc: Boolean = false,
+    val nested: Boolean = false,
+    val lineStart: Boolean = false
+)
 
 /** Описание языка для [CLikeLexer]: ключевые слова, комментарии, строки и особенности синтаксиса. */
 data class LexSpec(
@@ -175,7 +182,9 @@ class CLikeLexer(private val spec: LexSpec) : LineLexer {
             }
 
             // Блочные комментарии — раньше строчных (в Lua блок начинается с --[[)
-            val bc = if (mayStart(blockStarts, c)) blockRules.firstOrNull { line.startsWith(it.open, i) } else null
+            val bc = if (mayStart(blockStarts, c)) {
+                blockRules.firstOrNull { line.startsWith(it.open, i) && (!it.lineStart || i == 0) }
+            } else null
             if (bc != null) {
                 // "/**/" — пустой обычный комментарий, не документация
                 val rule = if (bc.doc && line.startsWith(bc.open.dropLast(1) + bc.close, i)) {

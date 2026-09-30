@@ -233,7 +233,7 @@ fun UnsavedChangesDialog(
                             modifier = Modifier.focusRequester(mainFocus)
                         ) {
                             if (busy) {
-                                CircularProgressIndicator(
+                                WexSpinner(
                                     modifier = Modifier.size(14.dp),
                                     strokeWidth = 2.dp,
                                     color = MaterialTheme.colorScheme.onPrimary

@@ -76,14 +76,13 @@ class JadxJob(val input: Path, val outDir: Path) {
 /** Установленные IDE, в которых можно открыть проект: подпись → исполняемый файл. */
 object ProjectIdes {
     val found: List<Pair<String, String>> by lazy {
-        val dirs = System.getenv("PATH").orEmpty().split(':').filter { it.isNotBlank() }
         listOf(
-            "Android Studio" to listOf("android-studio", "studio", "studio.sh"),
-            "IntelliJ IDEA" to listOf("idea", "intellij-idea-ultimate-edition", "intellij-idea-community-edition", "idea.sh"),
+            "Android Studio" to listOf("android-studio", "studio", "studio.sh", "studio64"),
+            "IntelliJ IDEA" to listOf("idea", "intellij-idea-ultimate-edition", "intellij-idea-community-edition", "idea.sh", "idea64"),
             "VS Code" to listOf("code", "codium")
         ).mapNotNull { (label, names) ->
-            names.firstNotNullOfOrNull { n -> dirs.map { File(it, n) }.firstOrNull { it.isFile && it.canExecute() } }
-                ?.let { label to it.path }
+            // which: разделитель PATH и .exe/.cmd на Windows (VS Code там — code.cmd)
+            names.firstNotNullOfOrNull { org.wexclient.app.util.ProcessRunner.which(it) }?.let { label to it }
         }
     }
 
@@ -244,7 +243,7 @@ private fun RunningPart(job: JadxJob, onHide: () -> Unit) {
             modifier = Modifier.fillMaxWidth().height(6.dp)
         )
     } else {
-        LinearProgressIndicator(
+        WexLinearSpinner(
             color = NoctaliaPrimary,
             trackColor = MaterialTheme.colorScheme.surfaceVariant,
             modifier = Modifier.fillMaxWidth().height(6.dp)

@@ -171,7 +171,7 @@ fun SshConnectDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (busy) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
+                        WexSpinner(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                         Spacer(modifier = Modifier.width(10.dp))
                         Text("Подключение…", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline, modifier = Modifier.weight(1f))
                     }

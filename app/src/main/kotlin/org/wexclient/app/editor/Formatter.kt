@@ -41,13 +41,13 @@ object CodeFormatter {
         val lang = snap.language
         return try {
             when {
-                lang.id == "json" -> jsonFormat(text, indentUnit)
+                lang.id == "json" -> jsonFormat(text, indentUnit, filePath?.fileName?.toString().orEmpty().lowercase())
                 lang.id == "xml" || lang.id == "html" -> FormatResult(XmlFormatter.format(text, indentUnit, lang.id == "html"), null, "XML")
                 lang.id == "smali" -> FormatResult(smaliFormat(text, indentUnit), null, "smali")
                 lang.id == "go" && ToolLocator.find("gofmt") != null -> external(listOf(ToolLocator.find("gofmt")!!), text, "gofmt")
                 lang.id == "qml" && ToolLocator.find("qmlformat") != null -> withTempFile("Format.qml", text) { f ->
                     val indentArgs = if (indentUnit == "\t") listOf("-t") else listOf("-w", indentUnit.length.toString())
-                    external(listOf(ToolLocator.find("qmlformat")!!) + indentArgs + f.absolutePath, null, "qmlformat")
+                    external(listOf(ToolLocator.find("qmlformat")!!) + indentArgs + f.absolutePath, null, "qmlformat", original = text)
                 }
                 lang.id == "fish" && ToolLocator.find("fish_indent") != null -> external(listOf(ToolLocator.find("fish_indent")!!), text, "fish_indent")
                 lang.id == "shell" && ToolLocator.find("shfmt") != null -> external(
@@ -64,6 +64,9 @@ object CodeFormatter {
                         "{BasedOnStyle: LLVM, IndentWidth: $width, TabWidth: $tabSize, UseTab: ${if (indentUnit == "\t") "ForIndentation" else "Never"}, ColumnLimit: 120, AllowShortFunctionsOnASingleLine: Empty}"
                     external(listOf(ToolLocator.find("clang-format")!!, "--assume-filename=$assumed", "--style=$style"), text, "clang-format")
                 }
+                // Без разбора лексером скобок не видно — «выравнивание» сняло бы все отступы
+                lang.id in REINDENT_LANGS && !snap.lexed ->
+                    FormatResult(null, "Файл слишком большой для разбора — отступы не выровнять", "отступы")
                 lang.id in REINDENT_LANGS -> FormatResult(Reindenter.reindent(snap, indentUnit, tabSize), null, "отступы")
                 else -> FormatResult(TextOps.trimTrailingWhitespace(text), null, "пробелы")
             }
@@ -96,7 +99,7 @@ object CodeFormatter {
      * Результат внешнего форматтера заменяет весь документ, поэтому берём только полный stdout:
      * обрезанный или смешанный с предупреждениями вывод после Ctrl+S испортил бы файл.
      */
-    private fun external(cmd: List<String>, input: String?, tool: String): FormatResult {
+    private fun external(cmd: List<String>, input: String?, tool: String, original: String? = input): FormatResult {
         val r = ToolLocator.run(cmd, input, timeoutMs = 15_000, separateErrors = true, maxChars = Int.MAX_VALUE)
             ?: return FormatResult(null, "Не удалось запустить $tool", tool)
         if (r.timedOut) return FormatResult(null, "$tool: превышено время ожидания", tool)
@@ -105,15 +108,22 @@ object CodeFormatter {
             return FormatResult(null, "$tool: $why", tool)
         }
         if (!r.complete) return FormatResult(null, "$tool: вывод прочитан не полностью — текст не изменён", tool)
-        if (r.output.isBlank() && !input.isNullOrBlank()) return FormatResult(null, "$tool: пустой результат — текст не изменён", tool)
+        if (r.output.isBlank() && !original.isNullOrBlank()) return FormatResult(null, "$tool: пустой результат — текст не изменён", tool)
         return FormatResult(r.output, null, tool)
     }
 
     // ---------- JSON с сохранением комментариев ----------
 
-    private fun jsonFormat(text: String, indent: String): FormatResult {
-        val errors = JsonChecker.check(text, lenient = true).filter { it.severity == Severity.ERROR }
-        if (errors.isNotEmpty()) return FormatResult(null, "Сначала исправьте ошибку JSON: ${errors.first().message}", "JSON")
+    private fun jsonFormat(text: String, indent: String, fileName: String): FormatResult {
+        // В JSON Lines каждая запись — одна строка: разложенные по строкам записи файл бы сломали
+        if (fileName.endsWith(".jsonl") || fileName.endsWith(".ndjson")) {
+            return FormatResult(null, "JSON Lines не форматируется: каждая запись должна остаться одной строкой", "JSON")
+        }
+        // JSON5 строгая проверка не пропустит (ключи без кавычек, одинарные кавычки) — форматируем как есть
+        if (!fileName.endsWith(".json5")) {
+            val errors = JsonChecker.check(text, lenient = true).filter { it.severity == Severity.ERROR }
+            if (errors.isNotEmpty()) return FormatResult(null, "Сначала исправьте ошибку JSON: ${errors.first().message}", "JSON")
+        }
         val out = StringBuilder(text.length + text.length / 4)
         var depth = 0
         var i = 0
@@ -152,10 +162,11 @@ object CodeFormatter {
                         i = k
                     } else i++
                 }
-                c == '"' -> {
+                // Одинарные кавычки — строка JSON5: её пробелы не должны пропасть
+                c == '"' || c == '\'' -> {
                     val start = i
                     i++
-                    while (i < n && text[i] != '"') {
+                    while (i < n && text[i] != c) {
                         if (text[i] == '\\') i++
                         i++
                     }
@@ -183,6 +194,8 @@ object CodeFormatter {
                 }
                 c == '{' || c == '[' -> {
                     val close = if (c == '{') '}' else ']'
+                    // Несколько значений подряд — каждое с новой строки, а не «}{»
+                    if (depth == 0 && !lineStart && out.isNotEmpty()) newline()
                     out.append(c)
                     i++
                     if (nextSignificant(i) == close) {
@@ -226,7 +239,7 @@ object CodeFormatter {
                 }
                 else -> {
                     val start = i
-                    while (i < n && !text[i].isWhitespace() && text[i] !in ",:{}[]\"/") i++
+                    while (i < n && !text[i].isWhitespace() && text[i] !in ",:{}[]\"'/") i++
                     if (i == start) i++
                     out.append(text, start, i)
                     lineStart = false
@@ -263,7 +276,9 @@ object CodeFormatter {
                 val name = m.groupValues[1].let { if (it == "parameter") "param" else it }
                 if (name == "field" || name == "param") {
                     // Блок только если следующая значимая строка — .annotation
-                    val next = lines.drop(idx + 1).firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+                    var nextIdx = idx + 1
+                    while (nextIdx < lines.size && lines[nextIdx].isBlank()) nextIdx++
+                    val next = lines.getOrNull(nextIdx)?.trim().orEmpty()
                     if (next.startsWith(".annotation")) stack.add(name)
                 } else stack.add(name)
             }
@@ -274,11 +289,17 @@ object CodeFormatter {
 
 /** Переотступ по скобкам: меняет только ведущие пробелы, не трогая строки внутри многострочных литералов. */
 object Reindenter {
+    /** Начала here-doc: Perl `<<"EOF"`, `<<~EOF`, PHP `<<<EOT`. Тело и концовка идут как есть. */
+    private val perlHeredoc = Regex("<<(~?)([\"']?)([A-Za-z_]\\w*)\\2")
+    private val phpHeredoc = Regex("<<<[ \t]*([\"']?)([A-Za-z_]\\w*)\\1")
+
     fun reindent(snap: HighlightSnapshot, indent: String, tabSize: Int): String {
         val text = snap.text
         val sb = StringBuilder(text.length + 256)
         var depth = 0
         var prevEndedInside = false
+        // Ждём концовок here-doc (по порядку): до них строки не трогаем
+        val heredocs = ArrayDeque<String>()
         for (line in 0 until snap.lineCount) {
             val ls = snap.lineStart(line)
             val le = snap.lineEnd(line)
@@ -286,16 +307,35 @@ object Reindenter {
             if (line > 0) sb.append('\n')
             val t = snap.lineTokens(line)
             val trimmed = raw.trim()
-            val firstNonWs = raw.indexOfFirst { !it.isWhitespace() }
-            // Продолжение многострочной строки/комментария — не трогаем (кроме строк " * ")
-            val firstTok = tokenAt(t, maxOf(0, firstNonWs))
-            if (prevEndedInside && (firstTok == Tok.STRING || firstTok == Tok.COMMENT || firstTok == Tok.DOC_COMMENT || firstTok == Tok.DOC_TAG)) {
-                if ((firstTok == Tok.COMMENT || firstTok == Tok.DOC_COMMENT || firstTok == Tok.DOC_TAG) && trimmed.startsWith("*")) {
-                    repeat(depth) { sb.append(indent) }
-                    sb.append(' ').append(trimmed)
-                } else sb.append(raw.trimEnd())
-                prevEndedInside = endsInside(t, raw.length)
+            if (heredocs.isNotEmpty()) {
+                sb.append(raw)
+                if (isHeredocEnd(trimmed, heredocs.first())) heredocs.removeFirst()
                 continue
+            }
+            val firstNonWs = raw.indexOfFirst { !it.isWhitespace() }
+            // Строка тянется дальше незакрытой (многострочный литерал или комментарий): лексер
+            // закончил её не в нуле, и последний кусок — строка или комментарий
+            val endsInsideHere = snap.endState(line) != 0 && (if (t.isEmpty()) prevEndedInside else endsInside(t, raw.length))
+            // Продолжение многострочной строки/комментария — не трогаем (кроме строк " * ").
+            // Смотрим на знак в начале строки: внутри литерала и отступ — его текст, а первым
+            // непробельным знаком может оказаться подстановка $name
+            if (prevEndedInside) {
+                val headTok = if (t.isEmpty()) null else tokenAt(t, 0)
+                val firstTok = if (t.isEmpty()) null else tokenAt(t, maxOf(0, firstNonWs))
+                val comment = headTok.isCommentPart()
+                if (t.isEmpty() || comment || headTok.isStringPart()) {
+                    when {
+                        comment && firstTok.isCommentPart() && trimmed.startsWith("*") -> {
+                            repeat(depth) { sb.append(indent) }
+                            sb.append(' ').append(trimmed)
+                        }
+                        // Внутри комментария хвостовые пробелы не нужны, внутри строки — это её текст
+                        comment -> sb.append(raw.trimEnd())
+                        else -> sb.append(raw)
+                    }
+                    prevEndedInside = endsInsideHere
+                    continue
+                }
             }
             if (trimmed.isEmpty()) {
                 prevEndedInside = false
@@ -317,7 +357,8 @@ object Reindenter {
             ) lineDepth++
             // case/default внутри switch — на уровень глубже тела уже учтено скобками; метки goto/private: не двигаем
             repeat(lineDepth) { sb.append(indent) }
-            sb.append(raw, firstNonWs, raw.trimEnd().length)
+            // Хвостовые пробелы срезаем, только если строка не уходит дальше внутри литерала
+            sb.append(raw, firstNonWs, if (endsInsideHere) raw.length else raw.trimEnd().length)
             // Пересчёт глубины по скобкам кода
             var j = 0
             while (j < t.size) {
@@ -331,10 +372,34 @@ object Reindenter {
                 }
                 j += 3
             }
-            prevEndedInside = endsInside(t, raw.length)
+            heredocStarts(snap.language.id, raw, t).forEach { heredocs.addLast(it) }
+            prevEndedInside = endsInsideHere
         }
         return sb.toString()
     }
+
+    /**
+     * Here-doc, начатые в строке кода. Лексеры Perl и PHP их не знают, и без этого тело и концовка
+     * получали отступ — а концовка Perl `EOF` должна стоять с начала строки, иначе скрипт не
+     * разбирается. Если начало найдено зря, остаток файла просто не выравнивается.
+     */
+    private fun heredocStarts(lang: String, raw: String, t: IntArray): List<String> {
+        val re = when (lang) {
+            "perl" -> perlHeredoc
+            "php" -> phpHeredoc
+            else -> return emptyList()
+        }
+        if (!raw.contains("<<")) return emptyList()
+        return re.findAll(raw).filter { m ->
+            val tok = tokenAt(t, m.range.first)
+            tok != Tok.STRING && tok != Tok.COMMENT && tok != Tok.DOC_COMMENT
+        }.map { m -> if (lang == "php") m.groupValues[2] else m.groupValues[3] }.toList()
+    }
+
+    /** Концовка here-doc: сам разделитель (в PHP 7.3+ — с отступом и знаком после). */
+    private fun isHeredocEnd(trimmed: String, name: String): Boolean =
+        trimmed == name || (trimmed.startsWith(name) && trimmed.length > name.length &&
+            !trimmed[name.length].isLetterOrDigit() && trimmed[name.length] != '_')
 
     private fun tokenAt(t: IntArray, rel: Int): Tok? {
         var k = 0
@@ -348,8 +413,12 @@ object Reindenter {
     private fun endsInside(t: IntArray, len: Int): Boolean {
         if (t.isEmpty()) return false
         val type = HighlightSnapshot.TOKS[t[t.size - 1]]
-        return t[t.size - 2] == len && (type == Tok.STRING || type == Tok.COMMENT || type == Tok.DOC_COMMENT || type == Tok.DOC_TAG)
+        return t[t.size - 2] == len && (type.isStringPart() || type.isCommentPart())
     }
+
+    private fun Tok?.isStringPart() = this == Tok.STRING || this == Tok.ESCAPE || this == Tok.VARIABLE
+
+    private fun Tok?.isCommentPart() = this == Tok.COMMENT || this == Tok.DOC_COMMENT || this == Tok.DOC_TAG
 }
 
 /** Форматирование XML: теги по строкам, атрибуты Android-стилем, текст внутри коротких элементов — в строку. */
@@ -367,9 +436,17 @@ object XmlFormatter {
         val out = ArrayList<Node>()
         var i = 0
         val n = s.length
+        // «<», за которым не имя, не «/», «!» или «?», — просто знак в тексте: «1 < 2», «<%= x %>»
+        fun startsTag(at: Int): Boolean {
+            val c = s.getOrNull(at + 1) ?: return false
+            return c.isLetter() || c == '_' || c == ':' || c == '!' || c == '?' ||
+                (c == '/' && s.getOrNull(at + 2)?.let { it.isLetter() || it == '_' || it == ':' } == true)
+        }
         while (i < n) {
-            if (s[i] != '<') {
-                val next = s.indexOf('<', i).let { if (it < 0) n else it }
+            if (s[i] != '<' || !startsTag(i)) {
+                var next = s.indexOf('<', i + 1)
+                while (next >= 0 && !startsTag(next)) next = s.indexOf('<', next + 1)
+                if (next < 0) next = n
                 out.add(Node.Text(s.substring(i, next)))
                 i = next
                 continue

@@ -89,7 +89,14 @@ internal class FastLayout(
 ) {
     val wrap: Boolean = columns > 0
 
-    private val shown = HashMap<Int, ShownLine>(256)
+    // Порядок доступа, давно не показанные вытесняются: без предела прокрутка огромного лога
+    // без правок копила копию каждой когда-либо показанной строки. Вытесненная посчитается заново
+    private val shown = object : LinkedHashMap<Int, ShownLine>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: Map.Entry<Int, ShownLine>) = size > MAX_SHOWN_LINES
+    }
+
+    /** Сколько строк сейчас в кэше показа — для тестов. */
+    internal val shownCount: Int get() = shown.size
 
     /** Спрятанные свёрткой строки. */
     private val hidden: BooleanArray? = if (collapsed.isEmpty()) null else BooleanArray(snapshot.lineCount).also { arr ->
@@ -182,7 +189,11 @@ internal class FastLayout(
         val line = snap.lineOf(safe)
         val column = shownLine(line).columnOf(safe - snap.lineStart(line))
         if (!wrap) return firstRowOf(line) to column
-        return (firstRowOf(line) + column / columns) to (column % columns)
+        val row = column / columns
+        // Конец строки ровно на границе переноса: такой экранной строки нет, каретка стоит в конце
+        // последней. Раньше она рисовалась в начале следующей строки текста
+        if (row > 0 && row >= rowsOf(line)) return (firstRowOf(line) + row - 1) to columns
+        return (firstRowOf(line) + row) to (column % columns)
     }
 
     /** Позиция в тексте для экранной строки и колонки. */
@@ -238,3 +249,6 @@ internal fun buildShownLine(
 
 /** Длиннее одного экрана всё равно не видно, а раскладка длинной строки дорогая. */
 private const val MAX_LINE_DRAW = 4000
+
+/** Показанных строк в кэше раскладки: с запасом на экран с переносом, каретки и выделение. */
+internal const val MAX_SHOWN_LINES = 2048

@@ -152,6 +152,7 @@ object Keymap {
         BindDef("app.search.content", GROUP_MAIN, "Поиск текста внутри файлов", "Ctrl+Shift+F"),
         BindDef("app.history", GROUP_MAIN, "История переходов", "Ctrl+H"),
         BindDef("app.ssh", GROUP_MAIN, "Подключиться к серверу по SSH", "Ctrl+Shift+K"),
+        BindDef("app.adb", GROUP_MAIN, "Телефон по adb: файлы и приложения", "Ctrl+Shift+M"),
         BindDef("app.diskusage", GROUP_MAIN, "Анализ занятого места", "Ctrl+Shift+U"),
         BindDef("app.foldercompare", GROUP_MAIN, "Сравнить папки панелей", "Ctrl+Shift+S"),
         BindDef("app.terminal", GROUP_MAIN, "Консоль панели", "Ctrl+T"),
@@ -229,7 +230,14 @@ object Keymap {
         BindDef("editor.moveUp", GROUP_EDITOR, "Строку выше", "Alt+Shift+↑"),
         BindDef("editor.moveDown", GROUP_EDITOR, "Строку ниже", "Alt+Shift+↓"),
         BindDef("editor.complete", GROUP_EDITOR, "Автодополнение", "Ctrl+Пробел"),
-        BindDef("editor.wrap", GROUP_EDITOR, "Перенос строк", "Alt+Z")
+        BindDef("editor.wrap", GROUP_EDITOR, "Перенос строк", "Alt+Z"),
+        BindDef("editor.findInSelection", GROUP_EDITOR, "Поиск в выделении", "Alt+L"),
+        BindDef("editor.nextOccurrence", GROUP_EDITOR, "Каретка на следующее вхождение", "Alt+J"),
+        BindDef("editor.prevOccurrence", GROUP_EDITOR, "Убрать последнее вхождение", "Alt+Shift+J"),
+        BindDef("editor.allOccurrences", GROUP_EDITOR, "Каретки на все вхождения", "Ctrl+Alt+Shift+J"),
+        BindDef("editor.caretAbove", GROUP_EDITOR, "Добавить каретку выше", "Ctrl+Alt+↑"),
+        BindDef("editor.caretBelow", GROUP_EDITOR, "Добавить каретку ниже", "Ctrl+Alt+↓"),
+        BindDef("editor.caretsLineEnds", GROUP_EDITOR, "Каретки в концы выделенных строк", "Alt+Shift+I")
     )
 
     private val byId: Map<String, BindDef> = binds.associateBy { it.id }

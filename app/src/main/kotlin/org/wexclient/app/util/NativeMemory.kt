@@ -26,6 +26,20 @@ object NativeMemory {
         }
     }
 
+    private val evictedBytes = java.util.concurrent.atomic.AtomicLong()
+
+    /**
+     * Кэш картинок вытеснил запись: её пиксели — вне кучи, и освободит их только сборка мусора, а записи
+     * успевают состариться и ждут редкой полной сборки. Набралось 32 МБ таких — просим сборку сами.
+     */
+    fun evicted(bytes: Long) {
+        if (evictedBytes.addAndGet(bytes) < EVICTED_LIMIT) return
+        evictedBytes.set(0)
+        releaseSoon(delayMs = 500)
+    }
+
+    private const val EVICTED_LIMIT = 32L shl 20
+
     fun releaseSoon(delayMs: Long = 1500) {
         if (!pending.compareAndSet(false, true)) return
         Thread({

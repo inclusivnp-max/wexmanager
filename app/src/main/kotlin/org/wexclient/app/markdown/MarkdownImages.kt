@@ -5,6 +5,7 @@ import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import org.wexclient.app.util.frozen
 import androidx.compose.ui.res.loadSvgPainter
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
@@ -27,6 +28,9 @@ class MdBitmap(val bitmap: ImageBitmap, val cssWidth: Float, val cssHeight: Floa
  */
 class PrivateAddressException(val host: String) : java.io.IOException("Адрес в локальной сети: $host")
 
+/** Сбой сети (нет связи, тайм-аут, обрыв): в кэш не кладётся, при следующем показе — новая попытка. */
+private class NetworkFailure(cause: java.io.IOException) : java.io.IOException(cause.message, cause)
+
 /** Картинки Markdown: файлы рядом с документом, http(s) и data:, растр и SVG. Кэш с пределом по памяти. */
 object MarkdownImages {
     private const val MAX_BYTES = 20L shl 20
@@ -37,23 +41,31 @@ object MarkdownImages {
      * без предела за день просмотра заметок набегали сотни мегабайт. Давно не нужные вытесняются.
      */
     private const val CACHE_BYTES = 160L shl 20
+
+    /** Предел числа записей: иначе тысячи мелких ошибок держали бы ключи и стеки вызовов. */
+    internal const val MAX_ENTRIES = 1024
+
+    /** Примерный вес ошибки в кэше: исключение со стеком вызовов. */
+    private const val FAILURE_BYTES = 2048L
     // Порядок доступа (accessOrder) — вытесняется давно не нужное. Без подкласса: у анонимного
     // наследника с Result (value class) в типе ломаются мостовые методы get/put
     private val cache = LinkedHashMap<String, Result<MdBitmap>>(64, 0.75f, true)
     private var cacheBytes = 0L
 
-    private fun sizeOf(r: Result<MdBitmap>): Long = r.getOrNull()?.bitmap?.let { it.width.toLong() * it.height * 4 } ?: 0L
+    // Ключ и ошибка тоже весят: раньше считались только пиксели, и неудачи копились «бесплатно»
+    private fun sizeOf(key: String, r: Result<MdBitmap>): Long =
+        key.length * 2L + (r.getOrNull()?.bitmap?.let { it.width.toLong() * it.height * 4 } ?: FAILURE_BYTES)
 
     private fun fromCache(key: String): Result<MdBitmap>? = synchronized(cache) { cache[key] }
 
     private fun toCache(key: String, value: Result<MdBitmap>) = synchronized(cache) {
-        cache.put(key, value)?.let { cacheBytes -= sizeOf(it) }
-        cacheBytes += sizeOf(value)
+        cache.put(key, value)?.let { cacheBytes -= sizeOf(key, it) }
+        cacheBytes += sizeOf(key, value)
         val it = cache.entries.iterator()
-        while (cacheBytes > CACHE_BYTES && it.hasNext()) {
+        while ((cacheBytes > CACHE_BYTES || cache.size > MAX_ENTRIES) && it.hasNext()) {
             val e = it.next()
             if (e.key == key) continue
-            cacheBytes -= sizeOf(e.value)
+            cacheBytes -= sizeOf(e.key, e.value)
             it.remove()
         }
     }
@@ -85,12 +97,20 @@ object MarkdownImages {
         val scheme = uri.scheme?.lowercase()
         require(scheme == "http" || scheme == "https") { "Неподдерживаемый адрес" }
         val host = uri.host ?: throw java.io.IOException("Нет адреса сервера")
-        val addresses = java.net.InetAddress.getAllByName(host)
+        val addresses = network { java.net.InetAddress.getAllByName(host) }
         if (addresses.isEmpty() || addresses.any(::isPrivate)) throw PrivateAddressException(host)
     }
 
-    fun key(src: String, baseDir: Path?): String =
-        if (isRemote(src) || src.startsWith("data:")) src else (resolve(src, baseDir)?.toString() ?: src)
+    fun key(src: String, baseDir: Path?): String = when {
+        // Сама data-строка — это вся картинка в base64, мегабайты; в ключе хватит её хэша
+        src.startsWith("data:") -> "data:sha256:" + java.security.MessageDigest.getInstance("SHA-256")
+            .digest(src.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        isRemote(src) -> src
+        else -> resolve(src, baseDir)?.toString() ?: src
+    }
+
+    /** Кэш картинок: число записей — для тестов. */
+    internal fun cacheSize(): Int = synchronized(cache) { cache.size }
 
     fun cached(src: String, baseDir: Path?): MdBitmap? = fromCache(key(src, baseDir))?.getOrNull()
 
@@ -135,8 +155,15 @@ object MarkdownImages {
             }
             decode(bytes)
         }
-        toCache(key, result)
+        if (result.exceptionOrNull() !is NetworkFailure) toCache(key, result)
         return result
+    }
+
+    /** Сетевой вызов: его ошибку ввода-вывода помечаем как временную. */
+    private inline fun <T> network(block: () -> T): T = try {
+        block()
+    } catch (e: java.io.IOException) {
+        throw NetworkFailure(e)
     }
 
     private fun fetchRemote(src: String, allowPrivate: Boolean): ByteArray {
@@ -149,7 +176,7 @@ object MarkdownImages {
                 .header("User-Agent", "WEXDesktop")
                 .GET()
                 .build()
-            val response = http.send(request, HttpResponse.BodyHandlers.ofInputStream())
+            val response = network { http.send(request, HttpResponse.BodyHandlers.ofInputStream()) }
             val code = response.statusCode()
             if (code in 300..399) {
                 response.body().close()
@@ -166,7 +193,7 @@ object MarkdownImages {
             }
             response.body().use { body ->
                 require(code in 200..299) { "HTTP $code" }
-                return body.readNBytes(MAX_BYTES.toInt())
+                return network { body.readNBytes(MAX_BYTES.toInt()) }
             }
         }
     }
@@ -214,7 +241,7 @@ object MarkdownImages {
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(bitmap), size) {
                 with(painter) { draw(size) }
             }
-            return MdBitmap(bitmap, w, h)
+            return MdBitmap(bitmap.frozen(), w, h)
         }
         val (bitmap, w, h) = raster(bytes) ?: throw java.io.IOException("Картинка слишком большая или повреждена")
         return MdBitmap(bitmap, w.toFloat(), h.toFloat())

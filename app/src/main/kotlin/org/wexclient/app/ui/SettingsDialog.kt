@@ -82,6 +82,10 @@ import org.wexclient.app.theme.AppTheme
 import org.wexclient.app.theme.BackgroundEffect
 import org.wexclient.app.theme.BackgroundPreferences
 import org.wexclient.app.theme.EffectDensity
+import org.wexclient.app.theme.SHADER_EFFECTS
+import org.wexclient.app.theme.SHADER_STYLES
+import org.wexclient.app.theme.TRAIL_COLORS
+import org.wexclient.app.theme.ShaderPrefs
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.runtime.key
@@ -111,7 +115,7 @@ import org.wexclient.app.theme.ThemePreferences
  */
 private enum class SettingsSection(val title: String, val icon: ImageVector, val hint: String) {
     APPEARANCE("Оформление", Icons.Default.Palette, "Тема, контраст, движение"),
-    BACKGROUND("Фон", Icons.Default.Wallpaper, "Картинка, затемнение, эффекты"),
+    BACKGROUND("Фон", Icons.Default.Wallpaper, "Живой фон, картинка, затемнение, эффекты"),
     LIST("Список файлов", Icons.Default.Folder, "Колонки, сортировка, вкладки"),
     EDITOR("Редактор", Icons.Default.Code, "Шрифт, подсказки, проверки"),
     TERMINAL("Консоль", Icons.Default.Terminal, "Оболочка, шрифт, высота"),
@@ -368,6 +372,8 @@ private fun AppearanceSettings(f: SettingsFilter) {
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun BackgroundSettings(f: SettingsFilter) {
+    LiveBackgroundSettings(f)
+
     GroupTitle("Картинка", f)
     if (BackgroundPreferences.systemWallpaperAvailable) {
         SettingsSwitch(
@@ -447,9 +453,150 @@ private fun BackgroundSettings(f: SettingsFilter) {
             BackgroundPreferences.updateBlur(12)
             BackgroundPreferences.updatePanelOpacity(88)
             BackgroundPreferences.updateEffect(BackgroundEffect.NONE)
+            BackgroundPreferences.updateShader { ShaderPrefs() }
         }) {
             Text("Вернуть обычный фон", fontSize = 12.sp, color = NoctaliaPrimary)
         }
+    }
+}
+
+/** Живой фон (как в WexRE): переливающийся градиент с элементами поверх, рисуется вместо картинки. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun LiveBackgroundSettings(f: SettingsFilter) {
+    val sh = BackgroundPreferences.shader
+    fun set(change: (ShaderPrefs) -> ShaderPrefs) = BackgroundPreferences.updateShader(change)
+
+    GroupTitle("Живой фон", f)
+    SettingsSwitch(
+        f,
+        "Анимированный фон",
+        "Живой градиент с эффектами и откликом на мышь — вместо картинки",
+        sh.enabled
+    ) { v -> set { it.copy(enabled = v) } }
+    if (!sh.enabled) return
+
+    if (f.hit("Предпросмотр", "живой фон анимированный")) {
+        ShaderPreview(sh)
+        Text(
+            "Сквозь панели фон виден настолько, насколько позволяет «Плотность панелей» ниже",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+        )
+    }
+    if (f.hit("Стиль", "тема лайм океан неон закат бирюза палитра")) {
+        Text("Стиль", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(4.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SHADER_STYLES.forEachIndexed { i, title ->
+                ChoiceChip(title, sh.style == i) { set { it.copy(style = i) } }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+    if (f.hit("Эффект живого фона", "боке частицы пузыри фигуры")) {
+        Text("Эффект", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(4.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SHADER_EFFECTS.forEachIndexed { i, title ->
+                ChoiceChip(title, sh.effect == i) { set { it.copy(effect = i) } }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+    SettingsSlider(f, "Насыщенность", sh.alpha, 0..80, "%", "насколько заметны цветные пятна") { v -> set { it.copy(alpha = v) } }
+    SettingsSlider(f, "Яркость", sh.intensity, 0..100, "%") { v -> set { it.copy(intensity = v) } }
+    SettingsSlider(f, "Сдвиг оттенка", sh.hue, -180..180, "°") { v -> set { it.copy(hue = v) } }
+    SettingsSlider(f, "Скорость", sh.speed, 10..100, "") { v -> set { it.copy(speed = v) } }
+    SettingsSlider(f, "Размытие живого фона", sh.blur, 0..40, " точек", "мягче переходы между пятнами") { v -> set { it.copy(blur = v) } }
+    if (sh.effect != 0) {
+        SettingsSlider(f, "Плотность эффекта", sh.effectDensity, 0..100, "%") { v -> set { it.copy(effectDensity = v) } }
+        SettingsSlider(f, "Размер элементов", sh.effectSize, 0..100, "%") { v -> set { it.copy(effectSize = v) } }
+        SettingsSlider(f, "Свечение", sh.effectGlow, 0..100, "%") { v -> set { it.copy(effectGlow = v) } }
+    }
+    SettingsSwitch(f, "Переливание цвета", "Оттенок плавно проходит по кругу", sh.colorAnimation) { v ->
+        set { it.copy(colorAnimation = v) }
+    }
+    SettingsSwitch(f, "Реакция на мышь", "Свечение со следом под курсором, при нажатии — ярче", sh.touch) { v ->
+        set { it.copy(touch = v) }
+    }
+    if (sh.touch) {
+        SettingsSwitch(
+            f,
+            "След за курсором",
+            "Свечение со следом идёт за курсором при обычном движении; выключено — только пока зажата кнопка",
+            sh.hoverTrail
+        ) { v -> set { it.copy(hoverTrail = v) } }
+        SettingsSlider(f, "Сила отклика", sh.touchIntensity, 0..100, "%", "насколько сильно курсор расталкивает пятна и фигуры") { v ->
+            set { it.copy(touchIntensity = v) }
+        }
+        TrailSettings(f, sh, ::set)
+    }
+}
+
+/** След за курсором: цвет, длина, толщина, яркость и свечение под самим курсором. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun TrailSettings(f: SettingsFilter, sh: ShaderPrefs, set: ((ShaderPrefs) -> ShaderPrefs) -> Unit) {
+    GroupTitle("След", f)
+    if (f.hit("Цвет следа", "тема белый голубой фиолетовый розовый оранжевый зелёный радуга")) {
+        Text("Цвет следа", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(4.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            TRAIL_COLORS.forEachIndexed { i, title ->
+                ChoiceChip(title, sh.trailColor == i) { set { it.copy(trailColor = i) } }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+    SettingsSlider(f, "Длина следа", sh.trailLength, 150..2000, " мс", "сколько живёт хвост за курсором") { v ->
+        set { it.copy(trailLength = v) }
+    }
+    SettingsSlider(f, "Толщина следа", sh.trailWidth, 20..250, "%") { v -> set { it.copy(trailWidth = v) } }
+    SettingsSlider(f, "Яркость следа", sh.trailBrightness, 5..100, "%") { v -> set { it.copy(trailBrightness = v) } }
+    SettingsSlider(f, "Размер свечения", sh.glowSize, 20..250, "%", "пятно света под самим курсором") { v ->
+        set { it.copy(glowSize = v) }
+    }
+    if (f.hit("Вернуть след по умолчанию", "след сбросить")) {
+        TextButton(onClick = {
+            val d = ShaderPrefs()
+            set {
+                it.copy(
+                    trailColor = d.trailColor,
+                    trailLength = d.trailLength,
+                    trailWidth = d.trailWidth,
+                    trailBrightness = d.trailBrightness,
+                    glowSize = d.glowSize
+                )
+            }
+        }) {
+            Text("Вернуть след по умолчанию", fontSize = 12.sp, color = NoctaliaPrimary)
+        }
+    }
+}
+
+/** Живой фон в маленьком окошке: настройки видно сразу, даже пока окно программы не в фокусе. */
+@Composable
+private fun ShaderPreview(prefs: ShaderPrefs) {
+    val renderer = remember { ShaderBackgroundRenderer() }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(140.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 1f))
+            .observeBackgroundTouches(renderer, prefs.touch)
+    ) {
+        ShaderBackground(prefs, renderer, animate = true)
+        if (prefs.touch) ShaderTouchOverlay(renderer)
+        Text(
+            "WEX",
+            fontSize = 26.sp,
+            fontWeight = FontWeight.Black,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.align(Alignment.Center)
+        )
     }
 }
 

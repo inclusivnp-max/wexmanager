@@ -2,16 +2,14 @@ package org.wexclient.app.dex
 
 import jadx.api.JadxArgs
 import jadx.api.JadxDecompiler
+import com.tim.dsmali.DexClassEditor
+import com.tim.dsmali.io.SmaliWriter
+import com.tim.dsmali.model.SmaliClass
 import kotlinx.coroutines.sync.Mutex
-import org.jf.baksmali.Adaptors.ClassDefinition
-import org.jf.baksmali.BaksmaliOptions
-import org.jf.baksmali.formatter.BaksmaliWriter
-import org.jf.dexlib2.DexFileFactory
 import org.jf.dexlib2.Opcodes
 import org.jf.dexlib2.dexbacked.DexBackedDexFile
 import org.jf.dexlib2.iface.ClassDef
 import java.io.File
-import java.io.StringWriter
 
 data class DexSource(
     val name: String,
@@ -217,8 +215,29 @@ class DexEditorEngine(
 
     // --- Правка smali (Dex Editor+) ---
 
-    // дескриптор класса -> (имя DEX, новый класс)
-    private val editedClasses = LinkedHashMap<String, Pair<String, ClassDef>>()
+    // дескриптор класса -> (имя DEX, собранный класс)
+    private val editedClasses = LinkedHashMap<String, Pair<String, SmaliClass>>()
+
+    /**
+     * smali-модели DEX (clazzpatcher) по имени DEX — из исходных байтов: правки хранятся отдельно и
+     * накладываются при каждой записи. Модель втрое-вчетверо больше самого DEX (8 МБ — около 26 МБ кучи),
+     * поэтому держатся две последние: у APK на десяток DEX (и в сравнении двух APK) остальные читаются
+     * заново по запросу — десятки миллисекунд.
+     */
+    private val smaliEditors = object : LinkedHashMap<String, DexClassEditor>(4, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DexClassEditor>) = size > MAX_SMALI_MODELS
+    }
+
+    private val originalSources = initialSources
+
+    private fun smaliEditor(sourceName: String): DexClassEditor {
+        val source = originalSources.firstOrNull { it.name == sourceName } ?: originalSources.first()
+        synchronized(smaliEditors) { smaliEditors[source.name] }?.let { return it }
+        // Чтение — вне блокировки: соседний DEX тем временем открывается без очереди
+        val editor = DexClassEditor(source.bytes)
+        return synchronized(smaliEditors) { smaliEditors.getOrPut(source.name) { editor } }
+    }
+
     private val pendingRebuild = LinkedHashSet<String>()
     private val unsavedSources = LinkedHashSet<String>()
 
@@ -234,29 +253,40 @@ class DexEditorEngine(
 
     private fun descriptorOf(node: DexClassNode): String = node.classDef.type
 
-    @Synchronized
-    fun effectiveClassDef(node: DexClassNode): ClassDef = editedClasses[descriptorOf(node)]?.second ?: node.classDef
-
     /**
      * Собирает smali класса и запоминает результат (DEX пересобирается лениво).
      * Ошибки синтаксиса — [SmaliSyntaxException] с номерами строк.
      */
-    @Synchronized
     fun compileSmali(node: DexClassNode, smali: String) {
-        val source = sources.firstOrNull { it.name == node.dexSourceName } ?: sources.first()
-        val def = SmaliAssembler.assemble(smali, SmaliAssembler.opcodesFor(source.bytes))
-        if (def.type != node.classDef.type) {
+        // Сборка — без блокировки движка: запись DEX в фоне её не задерживает
+        val cls = SmaliAssembler.assemble(smali)
+        if (cls.descriptor != node.classDef.type) {
             throw SmaliSyntaxException(
-                listOf("Имя класса изменено (${cleanDescriptor(def.type)}) — переименование через .class не поддерживается")
+                listOf("Имя класса изменено (${cleanDescriptor(cls.descriptor)}) — переименование через .class не поддерживается")
             )
         }
-        editedClasses[def.type] = source.name to def
+        synchronized(this) { remember(node, cls) }
+    }
+
+    private fun remember(node: DexClassNode, cls: SmaliClass) {
+        val source = sources.firstOrNull { it.name == node.dexSourceName } ?: sources.first()
+        editedClasses[cls.descriptor] = source.name to cls
         pendingRebuild.add(source.name)
         unsavedSources.add(source.name)
+        editVersion++
         invalidateDecompilers()
     }
 
-    /** Пересобирает DEX с правками (дорого для больших DEX — вызывать из фонового потока). */
+    /**
+     * Номер последней сборки класса. Запись DEX идёт без блокировки движка, и класс могут собрать прямо
+     * во время неё: [markSaved] с номером, снятым до записи, такую сборку сохранённой не посчитает.
+     */
+    private var editVersion = 0L
+
+    val currentEditVersion: Long
+        @Synchronized get() = editVersion
+
+    /** Пересобирает DEX с правками: заменяются только правленые классы (доли секунды; из фонового потока). */
     @Synchronized
     fun ensureRebuilt() {
         if (pendingRebuild.isEmpty()) return
@@ -264,8 +294,9 @@ class DexEditorEngine(
         for (name in pendingRebuild) {
             val idx = updated.indexOfFirst { it.name == name }
             if (idx < 0) continue
-            val replacements = editedClasses.filterValues { it.first == name }.mapValues { it.value.second }
-            val bytes = SmaliAssembler.rebuildDex(updated[idx].bytes, replacements)
+            // Все правки этого DEX — поверх исходного: модель та же, что для показа smali
+            val replacements = editedClasses.values.filter { it.first == name }.map { it.second }
+            val bytes = shallow { smaliEditor(name).rebuild(replacements) }
             updated[idx] = updated[idx].copy(bytes = bytes, tempFile = null)
         }
         pendingRebuild.clear()
@@ -280,8 +311,10 @@ class DexEditorEngine(
         return sources.filter { it.name in unsavedSources }
     }
 
+    /** Записанное — сохранено; если после [upTo] собирали ещё классы, пометки остаются (запишутся в следующий раз). */
     @Synchronized
-    fun markSaved() {
+    fun markSaved(upTo: Long = editVersion) {
+        if (editVersion != upTo) return
         unsavedSources.clear()
     }
 
@@ -291,19 +324,24 @@ class DexEditorEngine(
     }
 
     fun disassembleToSmali(classNode: DexClassNode): String {
-        val sw = StringWriter()
-        val writer = BaksmaliWriter(sw)
-        val options = BaksmaliOptions()
-        options.deodex = false
-        options.implicitReferences = false
-
-        val classDef = ClassDefinition(options, effectiveClassDef(classNode))
-        classDef.writeTo(writer)
-        return sw.toString()
+        val desc = descriptorOf(classNode)
+        synchronized(this) { editedClasses[desc] }?.let { return SmaliWriter.write(it.second) }
+        return shallow { smaliEditor(classNode.dexSourceName).smali(desc) } ?: "# Класс $desc не найден в DEX"
     }
 
-    fun decompileToJava(classNode: DexClassNode): String {
-        return try {
+    /**
+     * Разбор вложенных значений (аннотации, массивы) рекурсивен: DEX с нарочно глубокой вложенностью переполнил
+     * бы стек, а StackOverflowError — не Exception, и окно его не поймало бы. Здесь он становится обычной ошибкой.
+     */
+    private inline fun <T> shallow(block: () -> T): T =
+        try {
+            block()
+        } catch (_: StackOverflowError) {
+            throw IllegalStateException("Слишком глубокая вложенность значений в DEX")
+        }
+
+    fun decompileToJava(classNode: DexClassNode): String = decompiling {
+        try {
             ensureRebuilt()
             val jadx = getJadx()
             val jClass = jadx.classes.firstOrNull { it.fullName == classNode.fullName }
@@ -317,7 +355,7 @@ class DexEditorEngine(
         }
     }
 
-    // Общий кэш трансляции DEX -> jar для CFR и Vineflower (один прогон dex2jar на всех)
+    // Общий кэш трансляции DEX -> jar для CFR, Vineflower и Procyon (один перевод на всех)
     @Volatile
     private var jarCache = DexJarCache(initialSources)
 
@@ -337,11 +375,11 @@ class DexEditorEngine(
         }
     }
 
-    // Lazy CFR engine instance (DEX -> class via dex2jar -> Java via CFR)
+    // Lazy CFR engine instance (DEX -> class via d2c/dex2jar -> Java via CFR)
     private var cfrEngine: CfrEngine? = null
 
-    fun decompileToJavaCfr(classNode: DexClassNode): String {
-        return try {
+    fun decompileToJavaCfr(classNode: DexClassNode): String = decompiling {
+        try {
             ensureRebuilt()
             val engine = cfrEngine ?: CfrEngine(sources, jarCache).also { cfrEngine = it }
             engine.decompileToJava(classNode.fullName)
@@ -350,11 +388,11 @@ class DexEditorEngine(
         }
     }
 
-    // Lazy Vineflower engine instance (DEX -> class via dex2jar -> Java via Vineflower)
+    // Lazy Vineflower engine instance (DEX -> class via d2c/dex2jar -> Java via Vineflower)
     private var vineflowerEngine: VineflowerEngine? = null
 
-    fun decompileToJavaVineflower(classNode: DexClassNode): String {
-        return try {
+    fun decompileToJavaVineflower(classNode: DexClassNode): String = decompiling {
+        try {
             ensureRebuilt()
             val engine = vineflowerEngine ?: VineflowerEngine(sources, jarCache).also { vineflowerEngine = it }
             engine.decompileToJava(classNode.fullName)
@@ -363,11 +401,11 @@ class DexEditorEngine(
         }
     }
 
-    // Lazy Procyon engine instance (DEX -> class via dex2jar -> Java via Procyon)
+    // Lazy Procyon engine instance (DEX -> class via d2c/dex2jar -> Java via Procyon)
     private var procyonEngine: ProcyonEngine? = null
 
-    fun decompileToJavaProcyon(classNode: DexClassNode): String {
-        return try {
+    fun decompileToJavaProcyon(classNode: DexClassNode): String = decompiling {
+        try {
             ensureRebuilt()
             val engine = procyonEngine ?: ProcyonEngine(sources, jarCache).also { procyonEngine = it }
             engine.decompileToJava(classNode.fullName)
@@ -442,10 +480,26 @@ class DexEditorEngine(
         return results
     }
 
+    /**
+     * Окно закрыто. Декомпиляция, начатая ещё до этого, создаёт движок уже после close() — со своей временной
+     * папкой, удалить которую было бы некому. Такой вызов в конце закрывает всё сам ([decompiling]).
+     */
+    @Volatile
+    private var closed = false
+
+    private inline fun decompiling(block: () -> String): String =
+        try {
+            block()
+        } finally {
+            if (closed) closeDecompilers()
+        }
+
     fun close() {
+        closed = true
         closeDecompilers()
     }
 
+    @Synchronized
     private fun closeDecompilers() {
         try {
             jadxInstance?.close()
@@ -475,9 +529,12 @@ class DexEditorEngine(
         procyonEngine = null
         ghidraXrefCache.clear()
         jarCache.close()
+        if (closed) synchronized(smaliEditors) { smaliEditors.clear() }
     }
 
     companion object {
+        private const val MAX_SMALI_MODELS = 2
+
         fun cleanDescriptor(desc: String): String {
             return if (desc.startsWith("L") && desc.endsWith(";")) {
                 desc.substring(1, desc.length - 1).replace('/', '.')

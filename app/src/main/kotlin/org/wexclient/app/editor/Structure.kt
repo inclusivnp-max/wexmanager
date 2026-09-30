@@ -733,6 +733,10 @@ object OutlineEngine {
         return "(" + list.joinToString(", ") + "): " + prettyType(ret)
     }
 
+    /** Теги HTML, которые попадают в структуру и без id: заголовки и крупные части страницы. */
+    private val HTML_LANDMARKS = setOf(
+        "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "nav", "header", "footer", "main", "form", "table", "body", "head"
+    )
     private val attrName = Regex("\\b(?:android:id|android:name|name|id|app:title|android:title)\\s*=\\s*\"([^\"]*)\"")
 
     private fun markup(snap: HighlightSnapshot): List<OutlineItem> {
@@ -765,7 +769,7 @@ object OutlineEngine {
                             if (name != null && out.size < MAX_ITEMS) {
                                 val tagText = text.substring(pendingOffset, minOf(text.length, base + t[k + 1]))
                                 val label = attrName.find(tagText)?.groupValues?.get(1)
-                                val show = !isHtml || label != null || name.matches(Regex("h[1-6]|section|article|nav|header|footer|main|form|table|body|head"))
+                                val show = !isHtml || label != null || name in HTML_LANDMARKS
                                 if (show) {
                                     out.add(
                                         OutlineItem(

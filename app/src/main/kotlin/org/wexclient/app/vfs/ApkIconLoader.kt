@@ -21,7 +21,10 @@ import java.util.zip.ZipFile
  * двух архивов, картинки уменьшаются до [MAX_PX] и не декодируются, если заявлены огромными.
  */
 object ApkIconLoader {
-    private const val CACHE_ENTRIES = 400
+    // Почти каждая иконка — 192×192 (144 КБ): 400 штук держали ~59 МБ. Уменьшать нельзя — тот же
+    // кэш рисует окно APK (72 dp, на HiDPI до 216 px); 150 — с запасом на видимые строки двух панелей
+    private const val CACHE_ENTRIES = 150
+    internal const val FAILED_ENTRIES = 5000
     private const val MAX_PX = 192
     private const val MAX_SOURCE_PX = 4096
     private const val MAX_IMAGE_BYTES = 8 shl 20
@@ -29,9 +32,14 @@ object ApkIconLoader {
     private const val MAX_ARSC_BYTES = 128 shl 20
 
     private val iconCache = object : LinkedHashMap<String, ImageBitmap>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?) = size > CACHE_ENTRIES
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?) = (size > CACHE_ENTRIES).also {
+            if (it && eldest != null) org.wexclient.app.util.NativeMemory.evicted(eldest.value.width.toLong() * eldest.value.height * 4)
+        }
     }
-    private val failedCache = ConcurrentHashMap.newKeySet<String>()
+    // С пределом: каждый битый APK и каждая смена mtime оставляли ключ навсегда
+    private val failedCache = object : LinkedHashMap<String, Unit>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?) = size > FAILED_ENTRIES
+    }
     private val inFlight = ConcurrentHashMap<String, Deferred<ImageBitmap?>>()
 
     // Папка с сотней APK: не больше двух разборов resources.arsc одновременно
@@ -41,6 +49,9 @@ object ApkIconLoader {
     private fun key(path: Path, lastModified: Long): String =
         (try { path.toAbsolutePath().toString() } catch (_: Exception) { path.toString() }) + ":" + lastModified
 
+    /** Запомненных неудач (для тестов). */
+    internal fun failedCount(): Int = synchronized(failedCache) { failedCache.size }
+
     fun getCachedIcon(path: Path, lastModified: Long): ImageBitmap? {
         val k = key(path, lastModified)
         return synchronized(iconCache) { iconCache[k] }
@@ -49,7 +60,7 @@ object ApkIconLoader {
     suspend fun loadIcon(path: Path, lastModified: Long): ImageBitmap? {
         val k = key(path, lastModified)
         synchronized(iconCache) { iconCache[k] }?.let { return it }
-        if (k in failedCache) return null
+        if (synchronized(failedCache) { failedCache[k] != null }) return null
         val mine = CompletableDeferred<ImageBitmap?>()
         val running = inFlight.putIfAbsent(k, mine)
         if (running != null) return running.await()
@@ -68,7 +79,7 @@ object ApkIconLoader {
                 }
                 // В кэш — здесь же, а не после: строка могла уйти с экрана, пока шёл разбор (у набора —
                 // с копированием основного APK), и тогда при возврате всё делалось бы заново
-                if (result != null) synchronized(iconCache) { iconCache[k] = result } else failedCache.add(k)
+                if (result != null) synchronized(iconCache) { iconCache[k] = result } else synchronized(failedCache) { failedCache[k] = Unit }
                 mine.complete(result)
                 result
             }
@@ -206,35 +217,50 @@ object ApkIconLoader {
      * Строки пула по смещениям. Длина проверяется до выделения памяти, одно смещение
      * читается один раз: файл из APK может заявлять строки в гигабайты.
      */
-    private fun readStrings(buf: ByteBuffer, base: Int, offsets: IntArray, isUtf8: Boolean): List<String> {
-        val cache = HashMap<Int, String>()
-        return offsets.map { off ->
-            cache.getOrPut(off) {
-                try {
-                    val at = base.toLong() + off
-                    if (at < 0 || at >= buf.limit()) return@getOrPut ""
-                    buf.position(at.toInt())
-                    if (isUtf8) {
-                        val l1 = buf.get().toInt() and 0xFF
-                        if ((l1 and 0x80) != 0) buf.get()
-                        val l2 = buf.get().toInt() and 0xFF
-                        val byteLen = if ((l2 and 0x80) != 0) ((l2 and 0x7F) shl 8) or (buf.get().toInt() and 0xFF) else l2
-                        if (byteLen > buf.remaining()) return@getOrPut ""
-                        val strBytes = ByteArray(byteLen)
-                        buf.get(strBytes)
-                        String(strBytes, Charsets.UTF_8)
-                    } else {
-                        var charLen = buf.short.toInt() and 0xFFFF
-                        if ((charLen and 0x8000) != 0) charLen = ((charLen and 0x7FFF) shl 16) or (buf.short.toInt() and 0xFFFF)
-                        if (charLen.toLong() * 2 > buf.remaining()) return@getOrPut ""
-                        val chars = CharArray(charLen)
-                        for (c in 0 until charLen) chars[c] = buf.short.toInt().toChar()
-                        String(chars)
-                    }
-                } catch (_: RuntimeException) {
-                    ""
+    private fun readStrings(buf: ByteBuffer, base: Int, offsets: IntArray, isUtf8: Boolean): List<String> =
+        LazyPool(buf.duplicate().order(ByteOrder.LITTLE_ENDIAN), base, offsets, isUtf8)
+
+    /**
+     * Строки — по запросу: из глобального пула resources.arsc (100 000+ строк) значку нужны две-три,
+     * а разбор всего пула стоил на APK до 300 мс и десятков мегабайт мусора. Своя копия буфера:
+     * позиция разбора таблицы у вызывающего не сдвигается.
+     */
+    private class LazyPool(
+        private val buf: ByteBuffer,
+        private val base: Int,
+        private val offsets: IntArray,
+        private val isUtf8: Boolean
+    ) : AbstractList<String>() {
+        private val cache = HashMap<Int, String>()
+
+        override val size: Int get() = offsets.size
+
+        override fun get(index: Int): String {
+            val off = offsets[index]
+            return cache.getOrPut(off) { decode(off) }
+        }
+
+        private fun decode(off: Int): String = try {
+            val at = base.toLong() + off
+            if (at < 0 || at >= buf.limit()) ""
+            else {
+                buf.position(at.toInt())
+                if (isUtf8) {
+                    val l1 = buf.get().toInt() and 0xFF
+                    if ((l1 and 0x80) != 0) buf.get()
+                    val l2 = buf.get().toInt() and 0xFF
+                    val byteLen = if ((l2 and 0x80) != 0) ((l2 and 0x7F) shl 8) or (buf.get().toInt() and 0xFF) else l2
+                    if (byteLen > buf.remaining()) ""
+                    else ByteArray(byteLen).also { buf.get(it) }.toString(Charsets.UTF_8)
+                } else {
+                    var charLen = buf.short.toInt() and 0xFFFF
+                    if ((charLen and 0x8000) != 0) charLen = ((charLen and 0x7FFF) shl 16) or (buf.short.toInt() and 0xFFFF)
+                    if (charLen.toLong() * 2 > buf.remaining()) ""
+                    else String(CharArray(charLen) { buf.short.toInt().toChar() })
                 }
             }
+        } catch (_: RuntimeException) {
+            ""
         }
     }
 

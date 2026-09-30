@@ -66,8 +66,8 @@ object NavigationHistoryManager {
         isBeforeClose: Boolean = false,
         paneSide: String = "Левая"
     ) {
-        // Путь на сервере в историю не пишем: после перезапуска он открылся бы как локальный
-        if (path.fileSystem is org.wexclient.app.vfs.ssh.SshFileSystem) return
+        // Путь на сервере и телефоне в историю не пишем: после перезапуска он открылся бы как локальный
+        if (path.fileSystem is org.wexclient.app.vfs.remote.RemoteFileSystem) return
         val pathStr = path.toString()
         if (paneSide == "Левая") {
             lastLeftPath = pathStr
@@ -229,10 +229,13 @@ object NavigationHistoryManager {
             // Какие файлы открывались — личное: файл только для владельца
             val tmp = File(configDir, "history.tsv.tmp")
             tmp.delete()
-            java.nio.file.Files.createFile(
-                tmp.toPath(),
-                java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
-            )
+            // На NTFS прав POSIX нет — там доступ и так ограничен папкой профиля
+            if ("posix" in tmp.toPath().fileSystem.supportedFileAttributeViews()) {
+                java.nio.file.Files.createFile(
+                    tmp.toPath(),
+                    java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
+                )
+            }
             tmp.writeText(text, Charsets.UTF_8)
             java.nio.file.Files.move(
                 tmp.toPath(), historyFile.toPath(),

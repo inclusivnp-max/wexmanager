@@ -489,7 +489,7 @@ fun HexEditorDialog(
                     when {
                         isLoading -> {
                             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                WexSpinner(color = MaterialTheme.colorScheme.primary)
                             }
                         }
                         errorMessage != null -> {

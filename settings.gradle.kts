@@ -35,4 +35,13 @@ plugins {
 include(":app")
 include(":utils")
 
+// clazzpatcher (DEX ⇄ smali, DEX → .class) — отдельный проект рядом; путь можно переопределить свойством
+// clazzpatcher.dir. Собирается вместе с WEX тем же Kotlin, модулем com.tim:clazzpatcher.
+val clazzpatcherDir = file(providers.gradleProperty("clazzpatcher.dir").getOrElse("../../Tools/clazzpather-for-wex"))
+includeBuild(clazzpatcherDir) {
+    dependencySubstitution {
+        substitute(module("com.tim:clazzpatcher")).using(project(":app"))
+    }
+}
+
 rootProject.name = "WEXdesktop"

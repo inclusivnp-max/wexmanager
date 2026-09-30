@@ -119,7 +119,7 @@ class FilePaneState(
         sortField = field
         sortAscending = ascending
         if (side.isNotEmpty()) ViewPreferences.saveSort(side, field, ascending)
-        refresh()
+        refresh(source = ListSource.REARRANGE)
     }
 
     /** Клик по заголовку колонки: то же поле — смена направления. */
@@ -130,7 +130,7 @@ class FilePaneState(
     fun applyTypeFilter(filter: TypeFilter) {
         if (typeFilter == filter) return
         typeFilter = filter
-        refresh()
+        refresh(source = ListSource.REARRANGE)
     }
 
     var navDirection by mutableStateOf(NavDirection.NONE)
@@ -162,11 +162,17 @@ class FilePaneState(
     private val backStack = mutableListOf<Path>()
     private val forwardStack = mutableListOf<Path>()
 
+    /** «Назад» помнит последние [HISTORY_LIMIT] папок: вкладка живёт днями, и история росла без конца. */
+    private fun pushBack(path: Path) {
+        backStack.add(path)
+        if (backStack.size > HISTORY_LIMIT) backStack.removeAt(0)
+    }
+
     // Scroll positions remembered per path (pathKey -> Pair(firstVisibleItemIndex, firstVisibleItemScrollOffset))
-    private val scrollPositions = mutableMapOf<String, Pair<Int, Int>>()
+    private val scrollPositions = recentMap<String, Pair<Int, Int>>()
 
     // Map parent path -> name of child directory that was just exited (to refocus on return)
-    private val lastExitedChildMap = mutableMapOf<String, String>()
+    private val lastExitedChildMap = recentMap<String, String>()
 
     var focusedIndex by mutableStateOf(0)
 
@@ -305,13 +311,26 @@ class FilePaneState(
         try {
             val cooldown = externalCostMs * 8 - (System.currentTimeMillis() - externalDoneAt)
             if (cooldown > 0) kotlinx.coroutines.delay(cooldown)
+            // Пока ждали, ушли в другую папку или начали своё чтение — эта сверка уже не нужна
+            if (path != currentPath || searchQuery.isNotBlank() || listing || isLoading || archiveOpening) return
             // Любое своё чтение папки после этого момента новее — наш результат тогда не нужен
             val gen = listGen
             val arrangement = arrangement()
             val started = System.nanoTime()
+            // Что сейчас на экране — сравнить в фоне: если на диске всё то же, список не трогаем вовсе
+            val shown = entries.toList()
+            var same = false
+            var readError: String? = null
             val sorted = withContext(listDispatcher) {
                 if (!java.nio.file.Files.isDirectory(path)) null
-                else runCatching { arrange(vfsManager.listEntriesChecked(path).first, arrangement) }.getOrNull()
+                else runCatching {
+                    val cache = org.wexclient.app.vfs.ListingCache
+                    val before = if (cache.supports(path)) cache.stampOf(path) else null
+                    val (raw, error) = vfsManager.listEntriesChecked(path)
+                    if (error == null) cache.put(path, raw, before) else cache.invalidate(path)
+                    readError = error
+                    arrange(raw, arrangement).also { same = error == null && it == shown }
+                }.getOrNull()
             }
             externalCostMs = (System.nanoTime() - started) / 1_000_000
             externalDoneAt = System.currentTimeMillis()
@@ -326,17 +345,47 @@ class FilePaneState(
                 }
                 return
             }
-            applyExternal(sorted)
+            // Нет доступа и т. п. — ошибкой, а не «папка пуста»
+            if (readError != null) {
+                listError = readError
+                entries.clear()
+                return
+            }
+            if (!same) {
+                listError = null
+                applyExternal(sorted)
+            } else {
+                // Видимое то же, но могли смениться скрытые или отфильтрованные файлы (.gitignore, .env):
+                // git и место на диске — как и раньше, не чаще раза в 5 с
+                val now = System.currentTimeMillis()
+                if (now - extrasAt > 5000) {
+                    extrasAt = now
+                    refreshExtras()
+                }
+            }
         } finally {
             externalRunning = false
-        }
-        if (externalAgain) {
-            externalAgain = false
-            onExternalChange(path)
+            // Отложенную просьбу — для той папки, что открыта сейчас (прежняя могла смениться, пока шло чтение)
+            if (externalAgain) {
+                externalAgain = false
+                val now = currentPath
+                searchScope.launch { onExternalChange(now) }
+            }
         }
     }
 
     private var extrasAt = 0L
+
+    /**
+     * Список показан из кэша: имена те же (время изменения папки не сдвинулось), но файл могли переписать
+     * на месте — сверяем с диском в фоне, когда отрисуется первый кадр новой папки.
+     */
+    private fun revalidateSoon(path: Path) {
+        searchScope.launch {
+            kotlinx.coroutines.delay(REVALIDATE_DELAY_MS)
+            if (path == currentPath) onExternalChange(path)
+        }
+    }
 
     private fun applyExternal(sorted: List<VfsEntry>) {
         val focusedPath = entries.getOrNull(focusedIndex)?.path
@@ -378,8 +427,8 @@ class FilePaneState(
         if (!local) {
             git = null
             updateGitWatch(null)
-            // Место на сервере знает df; у архива своего места нет
-            if (path.fileSystem is org.wexclient.app.vfs.ssh.SshFileSystem) {
+            // Место на сервере и телефоне знает df; у архива своего места нет
+            if (path.fileSystem is org.wexclient.app.vfs.remote.RemoteFileSystem) {
                 searchScope.launch {
                     val space = withContext(Dispatchers.IO) { org.wexclient.app.vfs.DiskSpace.of(path) }
                     if (gen == gitGen) diskSpace = space
@@ -540,7 +589,7 @@ class FilePaneState(
         }
 
         if (saveHistory) {
-            backStack.add(currentPath)
+            pushBack(currentPath)
             forwardStack.clear()
         }
 
@@ -596,10 +645,33 @@ class FilePaneState(
         val tar = org.wexclient.app.vfs.archive.ArchiveFormats.isTarFamily(entry.name)
         val nested = entry.path.fileSystem !== java.nio.file.FileSystems.getDefault()
         if (!tar && !nested) {
-            try {
-                navigateTo(vfsManager.openArchive(entry.path), saveHistory = true, currentScroll = currentScroll)
-            } catch (e: Exception) {
-                fail(e)
+            if (archiveOpening) return
+            // Обычно это миллисекунды — ждём прямо здесь, и переход мгновенный. Но огромный APK/OBB (сотни
+            // тысяч записей) или архив, который как раз сохраняет другая операция (openArchive ждёт её
+            // блокировку), держали окно замороженным — дольше [QUICK_LIST_MS] ждём уже в фоне, с индикатором
+            val job = searchScope.async(Dispatchers.IO) { runCatching { vfsManager.openArchive(entry.path) } }
+            val quick = kotlinx.coroutines.runBlocking { kotlinx.coroutines.withTimeoutOrNull(QUICK_LIST_MS) { job.await() } }
+            if (quick != null) {
+                quick.onSuccess { navigateTo(it, saveHistory = true, currentScroll = currentScroll) }.onFailure { fail(it) }
+                return
+            }
+            archiveOpening = true
+            isLoading = true
+            loadingText = "Открытие «${entry.name}» — Esc для отмены"
+            val navAt = navigationId
+            val cancel = java.util.concurrent.atomic.AtomicBoolean(false)
+            archiveOpenCancel = cancel
+            searchScope.launch {
+                // Ушли из папки (даже в неё же обратно) или нажали Esc — панель отпускаем сразу, не дожидаясь
+                // zipfs: он доделает своё в фоне, и открытый архив потом просто найдётся уже открытым
+                while (!job.isCompleted && !cancel.get() && navigationId == navAt) kotlinx.coroutines.delay(50)
+                if (archiveOpenCancel === cancel) archiveOpenCancel = null
+                archiveOpening = false
+                if (!listing) isLoading = false
+                loadingText = null
+                if (cancel.get() || navigationId != navAt) return@launch
+                job.await().onSuccess { root -> navigateTo(root, saveHistory = true, currentScroll = currentScroll) }
+                    .onFailure { fail(it) }
             }
             return
         }
@@ -688,7 +760,7 @@ class FilePaneState(
                 scrollPositions[oldKey] = currentScroll
             }
             val next = vfsManager.live(forwardStack.removeAt(forwardStack.size - 1))
-            backStack.add(currentPath)
+            pushBack(currentPath)
             enter(next)
         }
     }
@@ -703,7 +775,10 @@ class FilePaneState(
         clearTypeAhead()
         searchQuery = ""
         focusedIndex = 0
-        refresh()
+        // Пауза между сверками считалась по прежней папке (у большой — секунды): новую сверяем без неё
+        externalCostMs = 0L
+        externalDoneAt = 0L
+        refresh(source = ListSource.NAVIGATION)
         // Анимация идёт ~0,2 с — дольше копию списка не держим
         searchScope.launch {
             kotlinx.coroutines.delay(1000)
@@ -724,6 +799,10 @@ class FilePaneState(
     /** Поколение чтения: результат старого не затирает новый (и автообновление тоже). */
     private var listGen = 0
     private var listing = false
+    private var listJob: kotlinx.coroutines.Deferred<*>? = null
+
+    /** Файл под курсором, когда началось медленное чтение (список на это время пуст). */
+    private var focusDuringLoad: String? = null
     private val afterLoad = ArrayList<Pair<Path, () -> Unit>>()
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val listDispatcher = Dispatchers.IO.limitedParallelism(2)
@@ -738,7 +817,7 @@ class FilePaneState(
      * огромная или на медленном (сетевом) диске — в фоне, с индикатором, окно не замирает.
      * [force] — заново спросить и git, и место на диске.
      */
-    fun refresh(force: Boolean = false) {
+    fun refresh(force: Boolean = false, source: ListSource = ListSource.DISK) {
         val query = searchQuery.trim()
         if (query.isEmpty()) {
             searchGen++ // гасим летящий поиск
@@ -749,14 +828,42 @@ class FilePaneState(
             val gen = ++listGen
             val path = currentPath
             // Та же папка (Ctrl+R, конец операции, пересортировка) — курсор на том же файле, а не на той же строке:
-            // появившийся выше файл иначе оказывался под курсором, и Delete ушёл бы не туда
-            val keepFocus = if (listedPath == path.toString()) entries.getOrNull(focusedIndex)?.path?.toString() else null
+            // появившийся выше файл иначе оказывался под курсором, и Delete ушёл бы не туда.
+            // Пока идёт медленное чтение, список пуст — берём курсор, запомненный при его начале
+            val keepFocus = if (listedPath == path.toString()) {
+                entries.getOrNull(focusedIndex)?.path?.toString() ?: focusDuringLoad
+            } else null
+            // Переставить без диска можно только то, что на экране: во время чтения папки или для другой
+            // папки в кэше может лежать устаревший список — тогда читаем заново
+            val src = if (source == ListSource.REARRANGE && (listing || listedPath != path.toString())) ListSource.DISK else source
             listing = true
             // Сортировка и фильтр — там же, в фоне: у папки на сотни тысяч файлов это заметное время
             val arrangement = arrangement()
+            // Из папки ушли — её чтение больше не нужно и не должно держать очередь чтения следующей
+            listJob?.cancel()
+            var fromCache = false
             val job = searchScope.async(listDispatcher) {
-                runCatching { vfsManager.listEntriesChecked(path).let { (list, error) -> arrange(list, arrangement) to error } }
+                runCatching {
+                    val cached = when (src) {
+                        ListSource.DISK -> null
+                        ListSource.REARRANGE -> org.wexclient.app.vfs.ListingCache.last(path)
+                        ListSource.NAVIGATION -> org.wexclient.app.vfs.ListingCache.fresh(path)
+                    }
+                    if (cached != null) {
+                        fromCache = true
+                        arrange(cached.entries, arrangement) to null
+                    } else {
+                        val cache = org.wexclient.app.vfs.ListingCache
+                        val before = if (cache.supports(path)) cache.stampOf(path) else null
+                        val (list, error) = vfsManager.listEntriesChecked(path) { !isActive }
+                        // Ошибка (права отобрали, папку удалили) — прежний удачный список больше не правда
+                        if (error == null) cache.put(path, list, before)
+                        else if (error != VfsManager.CANCELLED) cache.invalidate(path)
+                        arrange(list, arrangement) to error
+                    }
+                }
             }
+            listJob = job
             val waitStart = if (org.wexclient.app.util.Startup.enabled) System.nanoTime() else 0L
             val quick = kotlinx.coroutines.runBlocking {
                 kotlinx.coroutines.withTimeoutOrNull(QUICK_LIST_MS) { job.await() }
@@ -766,7 +873,9 @@ class FilePaneState(
             }
             if (quick != null) {
                 applyListing(path, quick.getOrElse { emptyList<VfsEntry>() to (it.message ?: it.javaClass.simpleName) }, force, keepFocus)
+                if (fromCache && src == ListSource.NAVIGATION) revalidateSoon(path)
             } else {
+                focusDuringLoad = keepFocus
                 entries.clear()
                 isLoading = true
                 if (!archiveOpening) loadingText = "Чтение папки…"
@@ -775,10 +884,19 @@ class FilePaneState(
                     if (gen != listGen) return@launch
                     if (!archiveOpening) loadingText = null
                     applyListing(path, result.getOrElse { emptyList<VfsEntry>() to (it.message ?: it.javaClass.simpleName) }, force, keepFocus)
+                    if (fromCache && src == ListSource.NAVIGATION) revalidateSoon(path)
                 }
             }
         } else {
+            // Медленное чтение папки, закончившись после начала поиска, затёрло бы находки
+            listGen++
+            listJob?.cancel()
             listing = false
+            // Индикатор отменённого чтения папки — долой (у поиска свой); открытие архива не трогаем
+            if (!archiveOpening) {
+                isLoading = false
+                loadingText = null
+            }
             // В списке — находки, а не содержимое папки
             listedPath = null
             // Поиск (fd-процесс до 2с / обход дерева) — только в фоне,
@@ -827,6 +945,7 @@ class FilePaneState(
 
     /** [result] — уже отсортированный и отфильтрованный список (сделано в фоне). */
     private fun applyListing(path: Path, result: Pair<List<VfsEntry>, String?>, forceExtras: Boolean, keepFocus: String? = null) {
+        focusDuringLoad = null
         listError = result.second
         entries.clear()
         entries.addAll(result.first)
@@ -880,8 +999,8 @@ class FilePaneState(
         foldersFirst = ViewPreferences.foldersFirst,
         sortField = sortField,
         ascending = sortAscending,
-        // Папка на сервере сортируется как обычная, а не «как внутри APK»
-        insideArchive = isInsideArchive && currentPath.fileSystem !is org.wexclient.app.vfs.ssh.SshFileSystem
+        // Папка на сервере и телефоне сортируется как обычная, а не «как внутри APK»
+        insideArchive = isInsideArchive && currentPath.fileSystem !is org.wexclient.app.vfs.remote.RemoteFileSystem
     )
 
     private fun applyEntries(listed: List<VfsEntry>) {
@@ -944,26 +1063,38 @@ class FilePaneState(
     fun ensureListed() {
         if (!awaitingFirstListing) return
         awaitingFirstListing = false
-        refresh()
+        refresh(source = ListSource.NAVIGATION)
     }
 
     // В конце класса: refresh() пользуется всеми полями выше
     init {
         vfsManager.addArchiveReopenListener(reopenListener)
-        if (listNow) refresh()
+        if (listNow) refresh(source = ListSource.NAVIGATION)
     }
 
     companion object {
         const val TYPE_AHEAD_MS = 1000L
 
+        /** Сколько папок помнят история «назад», позиции прокрутки и возврат к вышедшей папке. */
+        private const val HISTORY_LIMIT = 300
+
+        /** Словарь последних [HISTORY_LIMIT] папок: самая давняя уходит первой. */
+        private fun <K, V> recentMap(): MutableMap<K, V> = object : LinkedHashMap<K, V>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?) = size > HISTORY_LIMIT
+        }
+
         /** Столько ждём чтения папки в потоке окна, дальше — индикатор и фон. */
         private const val QUICK_LIST_MS = 60L
+
+        /** Сверка списка из кэша с диском — после анимации перехода, чтобы не делить с ней кадры. */
+        private const val REVALIDATE_DELAY_MS = 350L
 
         private fun arrange(listed: List<VfsEntry>, a: Arrangement): List<VfsEntry> {
             val filtered = listed.filter { e -> (a.showHidden || !e.name.startsWith(".")) && a.filter.accepts(e) }
             val hasAndroidPackageFiles = a.insideArchive || filtered.any {
-                val n = it.name.lowercase()
-                n == "androidmanifest.xml" || n.endsWith(".dex") || n == "resources.arsc"
+                val n = it.name
+                n.equals("androidmanifest.xml", ignoreCase = true) || n.endsWith(".dex", ignoreCase = true) ||
+                    n.equals("resources.arsc", ignoreCase = true)
             }
             // Ключ имени считается один раз на элемент, а не при каждом сравнении
             val lowerNames = HashMap<VfsEntry, String>(filtered.size * 2)
@@ -975,16 +1106,17 @@ class FilePaneState(
 
             // При равенстве ключа (размер, дата, тип) — по имени по возрастанию
             val order: Comparator<VfsEntry> = when (a.sortField) {
+                // Числа — сравнением примитивов: compareBy упаковывал Long/Int на каждое сравнение
                 SortField.NAME -> if (hasAndroidPackageFiles) {
-                    compareBy<VfsEntry> { it.apkItemPriority }
-                        .thenBy { it.dexNaturalIndex }
+                    Comparator<VfsEntry> { x, y -> x.apkItemPriority.compareTo(y.apkItemPriority) }
+                        .then { x, y -> x.dexNaturalIndex.compareTo(y.dexNaturalIndex) }
                         .then(byName)
                         .directed()
                 } else {
                     byName.directed()
                 }
-                SortField.SIZE -> compareBy<VfsEntry> { it.size }.directed().then(byName)
-                SortField.DATE -> compareBy<VfsEntry> { it.lastModified }.directed().then(byName)
+                SortField.SIZE -> Comparator<VfsEntry> { x, y -> x.size.compareTo(y.size) }.directed().then(byName)
+                SortField.DATE -> Comparator<VfsEntry> { x, y -> x.lastModified.compareTo(y.lastModified) }.directed().then(byName)
                 SortField.TYPE -> compareBy<VfsEntry> { it.itemType.name }.directed().then(byName)
                 SortField.EXTENSION -> compareBy<VfsEntry> { if (it.isDirectory) "" else it.extension.lowercase() }
                     .directed().then(byName)
@@ -1058,4 +1190,16 @@ class OpeningFile(val path: Path) {
         // Перерисовка — на каждый процент, не на каждый блок
         if (prev == null || p - prev >= 0.01f || (p >= 1f && prev < 1f)) progress = p
     }
+}
+
+/** Откуда брать список в [FilePaneState.refresh]. */
+enum class ListSource {
+    /** Прочитать папку с диска: Ctrl+R, конец операции, изменение на диске. */
+    DISK,
+
+    /** Переход в папку: недавний список, если папка с тех пор не менялась, — сразу, потом тихая сверка. */
+    NAVIGATION,
+
+    /** Сменились сортировка или фильтр: переставить уже прочитанное, диск не трогая. */
+    REARRANGE
 }

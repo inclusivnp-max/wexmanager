@@ -7,6 +7,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -75,6 +76,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import org.wexclient.app.vfs.GitMark
@@ -282,22 +284,28 @@ fun FileItemRow(
                 }
             }
     ) {
-        Surface(
+        // Фон и рамка строки — без Surface: он ещё и обрезал содержимое по скруглённому контуру (свой слой
+        // со сглаженной маской на каждую строку, и так каждый кадр живого фона). Содержимое от углов
+        // отстоит на отступ — обрезать нечего
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 4.dp, vertical = 1.dp)
                 .combinedClickable(
                     onClick = onClick,
                     onLongClick = onLongClick
-                ),
-            color = bgColor,
-            shape = RoundedCornerShape(6.dp),
-            border = border
+                )
+                .then(if (border != null) Modifier.border(border, RowShape) else Modifier)
+                .background(bgColor, RowShape),
+            propagateMinConstraints = true
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .alpha(rowContentAlpha)
+                    // Слой с альфой — только у приглушённых строк (вырезанные, скрытые, игнорируемые git);
+                    // обычной строке он не нужен. ModulateAlpha не годится: на skiko текст и значки рисуются
+                    // мимо Compose Paint и остались бы непрозрачными
+                    .then(if (rowContentAlpha < 1f) Modifier.alpha(rowContentAlpha) else Modifier)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -885,12 +893,11 @@ private fun OpeningProgress(opening: OpeningFile) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         } else {
-            androidx.compose.material3.LinearProgressIndicator(
+            WexLinearSpinner(
                 modifier = barModifier,
                 color = NoctaliaPrimary,
                 trackColor = track,
-                strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
-                gapSize = 0.dp
+                strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
             )
         }
     }
@@ -943,7 +950,9 @@ private fun RunButton(fileName: String, onRun: () -> Unit, inConsole: Boolean = 
                 .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon.Hand)
                 .clickable(interactionSource = interaction, indication = null, onClick = onRun)
         ) {
-        androidx.compose.foundation.Canvas(modifier = Modifier.size(15.3.dp)) {
+        // Контур — один на размер (drawWithCache): новый Path на каждую отрисовку — нативный объект Skia,
+        // который ждал сборщика мусора, по штуке на каждую строку со скриптом при каждой перерисовке списка
+        androidx.compose.foundation.layout.Spacer(modifier = Modifier.size(15.3.dp).drawWithCache {
             // Треугольник с мягкими углами: заливка + обводка того же цвета со скруглёнными стыками
             val w = size.width
             val h = size.height
@@ -954,16 +963,15 @@ private fun RunButton(fileName: String, onRun: () -> Unit, inConsole: Boolean = 
                 lineTo(w * 0.30f, h * 0.80f)
                 close()
             }
-            drawPath(path, color)
-            drawPath(
-                path,
-                color,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(
-                    width = round * 2,
-                    join = androidx.compose.ui.graphics.StrokeJoin.Round
-                )
+            val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = round * 2,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round
             )
-        }
+            onDrawBehind {
+                drawPath(path, color)
+                drawPath(path, color, style = stroke)
+            }
+        })
         }
     }
 }
@@ -1065,3 +1073,5 @@ private fun GitMarkBadge(mark: GitMark, color: Color, folder: Boolean) {
         )
     }
 }
+
+private val RowShape = RoundedCornerShape(6.dp)

@@ -68,6 +68,9 @@ object JadxExport {
             isDeobfuscationOn = options.deobfuscate
             isUseImports = true
             exportGradleType = if (options.gradle) ExportGradleType.AUTO else null
+            // Код сразу уходит в файлы — держать весь декомпилированный APK в куче до конца экспорта
+            // (кэш jadx по умолчанию, у больших приложений — гигабайты) незачем; так же делает jadx-cli
+            codeCache = jadx.api.impl.NoOpCodeCache()
         }
         JadxDecompiler(args).use { jadx ->
             onProgress(JadxExportProgress("Чтение классов и ресурсов", 0, 0))

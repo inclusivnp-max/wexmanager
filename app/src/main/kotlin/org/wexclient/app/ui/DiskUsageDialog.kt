@@ -94,19 +94,44 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Последний подсчёт: повторно окно для той же папки открывается сразу, «Заново» пересчитает. */
+/**
+ * Последний подсчёт: повторно окно для той же папки открывается сразу, «Заново» пересчитает.
+ * Дерево в сотни тысяч узлов — это десятки мегабайт, поэтому держим его недолго: через [KEEP_MS]
+ * после подсчёта и когда закрыты все окна оно забывается.
+ */
 object DiskUsageSession {
-    var last: DuResult? = null
-        private set
+    @Volatile
+    private var result: DuResult? = null
+    private var expiry: kotlinx.coroutines.Job? = null
+
+    val last: DuResult?
+        get() {
+            if (result != null && System.currentTimeMillis() - at > KEEP_MS) result = null
+            return result
+        }
     var at: Long = 0L
         private set
 
     fun remember(result: DuResult) {
         // Огромное дерево не держим в памяти после закрытия окна
         val nodes = result.top.files + result.top.dirs
-        last = if (nodes <= 400_000) result else null
-        at = System.currentTimeMillis()
+        this.result = if (nodes <= 400_000) result else null
+        val stamp = System.currentTimeMillis()
+        at = stamp
+        // Срок проверялся только при следующем открытии: не открыли — десятки мегабайт дерева жили до
+        // закрытия всех окон. Теперь забывается само
+        expiry?.cancel()
+        expiry = kotlinx.coroutines.GlobalScope.launch {
+            kotlinx.coroutines.delay(KEEP_MS)
+            if (at == stamp) this@DiskUsageSession.result = null
+        }
     }
+
+    fun forget() {
+        result = null
+    }
+
+    private const val KEEP_MS = 10 * 60_000L
 }
 
 /**
@@ -391,7 +416,7 @@ fun DiskUsageDialog(
                             modifier = Modifier.weight(1f)
                         )
                         if (rescanning) {
-                            CircularProgressIndicator(color = NoctaliaPrimary, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                            WexSpinner(color = NoctaliaPrimary, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
                         }
                         ToolAction("Открыть", Icons.Default.FolderOpen, enabled = sel?.isDir == true) { sel?.let { openDir(it) } }
                         ToolAction("Пересчитать", Icons.Default.Refresh, enabled = sel?.isDir == true && !rescanning) { sel?.let { rescan(it) } }
@@ -452,7 +477,7 @@ fun DiskUsageDialog(
 private fun ScanProgress(p: DuProgress, onStop: () -> Unit) {
     Box(modifier = Modifier.fillMaxSize()) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.align(Alignment.Center)) {
-            CircularProgressIndicator(color = NoctaliaPrimary, strokeWidth = 2.5.dp, modifier = Modifier.size(28.dp))
+            WexSpinner(color = NoctaliaPrimary, strokeWidth = 2.5.dp, modifier = Modifier.size(28.dp))
             Spacer(modifier = Modifier.height(12.dp))
             Text(
                 "Просмотрено ${grouped(p.files)} ${filesWord(p.files)} · ${humanSize(p.bytes)}",

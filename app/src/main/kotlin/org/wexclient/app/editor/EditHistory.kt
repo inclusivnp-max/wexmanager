@@ -61,24 +61,74 @@ class TextEdit(val start: Int, val removed: String, val inserted: String) {
             while (lo < hi && a[al - 1 - lo] == b[bl - 1 - lo]) lo++
             return lo
         }
+
+        /**
+         * Слой правок (у каждой каретки своя, не пересекаются, по возрастанию позиций, в координатах
+         * текста до слоя) — применить за один проход. null — текст не тот, к которому они относятся.
+         */
+        internal fun applyLayer(text: String, layer: List<TextEdit>): String? {
+            val sb = StringBuilder(text.length + layer.sumOf { it.delta }.coerceAtLeast(0))
+            var pos = 0
+            for (e in layer) {
+                if (e.start < pos || e.removedEnd > text.length || !text.regionMatches(e.start, e.removed, 0, e.removed.length)) return null
+                sb.append(text, pos, e.start).append(e.inserted)
+                pos = e.removedEnd
+            }
+            sb.append(text, pos, text.length)
+            return sb.toString()
+        }
+
+        /** Обратное к [applyLayer]: из текста после слоя — текст до него. */
+        internal fun revertLayer(text: String, layer: List<TextEdit>): String? {
+            val sb = StringBuilder(text.length)
+            var pos = 0
+            var shift = 0
+            for (e in layer) {
+                val at = e.start + shift
+                if (at < pos || at + e.inserted.length > text.length || !text.regionMatches(at, e.inserted, 0, e.inserted.length)) return null
+                sb.append(text, pos, at).append(e.removed)
+                pos = at + e.inserted.length
+                shift += e.delta
+            }
+            sb.append(text, pos, text.length)
+            return sb.toString()
+        }
     }
 }
 
 enum class EditKind { TYPING, DELETE, OTHER }
 
-/** История правок: хранит только изменения, соседний ввод склеивается по словам. */
-class EditHistory(private val maxSteps: Int = 3000, private val maxChars: Long = 60_000_000L) {
+/**
+ * История правок: хранит только изменения, соседний ввод склеивается по словам.
+ * [maxChars] — предел в знаках вместе с весом самих правок (см. [EDIT_OVERHEAD]).
+ */
+class EditHistory(private val maxSteps: Int = 3000, private val maxChars: Long = 24_000_000L) {
+    /**
+     * Шаг отмены — слои правок по порядку. Обычная правка — один слой с одной правкой; ввод
+     * несколькими каретками — по слою на нажатие, в слое по правке на каретку.
+     */
     private class Step(
-        var edit: TextEdit,
+        val layers: MutableList<List<TextEdit>>,
         val selectionBefore: TextRange,
         var selectionAfter: TextRange,
         var time: Long,
-        val kind: EditKind
-    )
+        val kind: EditKind,
+        val extrasBefore: List<TextRange> = emptyList(),
+        var extrasAfter: List<TextRange> = emptyList(),
+        val multi: Boolean = false
+    ) {
+        /** Правка единственная — такую можно склеить с соседним вводом. */
+        val single: TextEdit? get() = layers.singleOrNull()?.singleOrNull()
+
+        /** Вес шага в знаках — столько же вычитается, когда шаг уходит из истории. */
+        var cost = 0L
+    }
 
     private val undoStack = ArrayDeque<Step>()
     private val redoStack = ArrayDeque<Step>()
-    private var storedChars = 0L
+    /** Вес всей истории (отмена и повтор) в знаках; внутреннее — для тестов. */
+    internal var storedChars = 0L
+        private set
     private var noMerge = false
 
     /** Меняется при каждой операции — для перерисовки кнопок. */
@@ -100,33 +150,89 @@ class EditHistory(private val maxSteps: Int = 3000, private val maxChars: Long =
         noMerge = true
     }
 
+    private fun costOf(edit: TextEdit): Long = edit.removed.length + edit.inserted.length + EDIT_OVERHEAD
+
+    private fun costOf(layer: List<TextEdit>): Long = layer.sumOf { costOf(it) }
+
+    /** Новая правка отменяет повтор — и его вес уходит из счёта, иначе счёт рос без самих шагов. */
+    private fun dropRedo() {
+        for (step in redoStack) storedChars -= step.cost
+        redoStack.clear()
+    }
+
     fun record(edit: TextEdit, selectionBefore: TextRange, selectionAfter: TextRange, kind: EditKind) {
         if (edit.isEmpty) return
-        redoStack.clear()
+        dropRedo()
         val now = System.currentTimeMillis()
         val last = undoStack.lastOrNull()
-        val merged = if (!noMerge && last != null && now - last.time < 1500) tryMerge(last, edit, kind) else null
+        val prev = last?.single
+        val merged = if (!noMerge && last != null && prev != null && !last.multi && now - last.time < MERGE_MS) {
+            tryMerge(prev, last.kind, edit, kind)
+        } else null
         noMerge = false
         if (merged != null) {
-            storedChars += merged.removed.length + merged.inserted.length -
-                (last!!.edit.removed.length + last.edit.inserted.length)
-            last.edit = merged
+            val grow = costOf(merged) - costOf(prev!!)
+            last.cost += grow
+            storedChars += grow
+            last.layers[0] = listOf(merged)
             last.selectionAfter = selectionAfter
             last.time = now
         } else {
-            undoStack.addLast(Step(edit, selectionBefore, selectionAfter, now, kind))
-            storedChars += edit.removed.length + edit.inserted.length
+            val step = Step(mutableListOf(listOf(edit)), selectionBefore, selectionAfter, now, kind)
+            step.cost = costOf(edit)
+            undoStack.addLast(step)
+            storedChars += step.cost
         }
+        trim()
+    }
+
+    /**
+     * Правка несколькими каретками: [layer] — по правке на каретку (по возрастанию позиций, в
+     * координатах текста до правки). Ввод и удаление подряд копятся в одном шаге, как и одной кареткой.
+     */
+    fun recordCarets(
+        layer: List<TextEdit>,
+        selectionBefore: TextRange,
+        selectionAfter: TextRange,
+        extrasBefore: List<TextRange>,
+        extrasAfter: List<TextRange>,
+        kind: EditKind
+    ) {
+        val edits = layer.filterNot { it.isEmpty }
+        if (edits.isEmpty()) return
+        dropRedo()
+        val now = System.currentTimeMillis()
+        val last = undoStack.lastOrNull()
+        // Слишком тяжёлый шаг больше не растёт: единственный шаг trim() не трогает, и долгий ввод
+        // тысячами кареток копил слои без предела
+        val mergeable = !noMerge && last != null && last.multi && last.kind == kind && kind != EditKind.OTHER &&
+            now - last.time < MERGE_MS && edits.none { it.inserted.contains('\n') } && last.cost < maxChars / 8
+        noMerge = false
+        val cost = costOf(edits)
+        if (mergeable) {
+            last!!.layers.add(edits)
+            last.selectionAfter = selectionAfter
+            last.extrasAfter = extrasAfter
+            last.time = now
+            last.cost += cost
+        } else {
+            val step = Step(mutableListOf(edits), selectionBefore, selectionAfter, now, kind, extrasBefore, extrasAfter, multi = true)
+            step.cost = cost
+            undoStack.addLast(step)
+        }
+        storedChars += cost
+        trim()
+    }
+
+    private fun trim() {
         while (undoStack.size > 1 && (undoStack.size > maxSteps || storedChars > maxChars)) {
-            val dropped = undoStack.removeFirst()
-            storedChars -= dropped.edit.removed.length + dropped.edit.inserted.length
+            storedChars -= undoStack.removeFirst().cost
         }
         version++
     }
 
-    private fun tryMerge(last: Step, edit: TextEdit, kind: EditKind): TextEdit? {
-        if (kind != last.kind || kind == EditKind.OTHER) return null
-        val prev = last.edit
+    private fun tryMerge(prev: TextEdit, prevKind: EditKind, edit: TextEdit, kind: EditKind): TextEdit? {
+        if (kind != prevKind || kind == EditKind.OTHER) return null
         return when (kind) {
             EditKind.TYPING -> {
                 if (edit.removed.isNotEmpty() || edit.start != prev.insertedEnd) return null
@@ -151,36 +257,53 @@ class EditHistory(private val maxSteps: Int = 3000, private val maxChars: Long =
         }
     }
 
+    /** Каретки, которые вернула последняя отмена или повтор (кроме основной). */
+    var restoredExtras: List<TextRange> = emptyList()
+        private set
+
     fun undo(current: TextFieldValue): TextFieldValue? {
         val step = undoStack.removeLastOrNull() ?: return null
-        val e = step.edit
-        val text = current.text
-        if (e.insertedEnd > text.length || text.regionMatches(e.start, e.inserted, 0, e.inserted.length).not()) {
-            // История разошлась с текстом (внешняя замена) — безопаснее её сбросить
-            clear()
-            return null
+        var text = current.text
+        for (layer in step.layers.asReversed()) {
+            text = TextEdit.revertLayer(text, layer) ?: run {
+                // История разошлась с текстом (внешняя замена) — безопаснее её сбросить
+                clear()
+                return null
+            }
         }
         redoStack.addLast(step)
         noMerge = true
         version++
-        val newText = text.substring(0, e.start) + e.removed + text.substring(e.insertedEnd)
-        return TextFieldValue(newText, clamp(step.selectionBefore, newText.length))
+        restoredExtras = step.extrasBefore.map { clamp(it, text.length) }
+        return TextFieldValue(text, clamp(step.selectionBefore, text.length))
     }
 
     fun redo(current: TextFieldValue): TextFieldValue? {
         val step = redoStack.removeLastOrNull() ?: return null
-        val e = step.edit
-        val text = current.text
-        if (e.removedEnd > text.length || text.regionMatches(e.start, e.removed, 0, e.removed.length).not()) {
-            clear()
-            return null
+        var text = current.text
+        for (layer in step.layers) {
+            text = TextEdit.applyLayer(text, layer) ?: run {
+                clear()
+                return null
+            }
         }
         undoStack.addLast(step)
         noMerge = true
         version++
-        val newText = text.substring(0, e.start) + e.inserted + text.substring(e.removedEnd)
-        return TextFieldValue(newText, clamp(step.selectionAfter, newText.length))
+        restoredExtras = step.extrasAfter.map { clamp(it, text.length) }
+        return TextFieldValue(text, clamp(step.selectionAfter, text.length))
     }
 
     private fun clamp(r: TextRange, len: Int) = TextRange(r.start.coerceIn(0, len), r.end.coerceIn(0, len))
+
+    private companion object {
+        /** Ввод подряд быстрее этого — один шаг отмены. */
+        const val MERGE_MS = 1500L
+
+        /**
+         * Вес одной правки сверх её знаков: объект, две строки и место в списке — около 100 байт.
+         * Без него тысячи правок в один знак (ввод многими каретками) почти ничего «не весили».
+         */
+        const val EDIT_OVERHEAD = 64L
+    }
 }

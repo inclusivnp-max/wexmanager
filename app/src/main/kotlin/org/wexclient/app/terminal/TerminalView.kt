@@ -56,6 +56,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.KeyEvent
@@ -202,6 +203,10 @@ private class TerminalPainter(val m: CellMetrics, val theme: TerminalTheme, val 
     val fill = Paint().apply { isAntiAlias = false }
     val text = Paint().apply { isAntiAlias = true }
     val line = Paint().apply { isAntiAlias = true; mode = PaintMode.STROKE }
+
+    // Контур для скруглённых уголков и символов Powerline — один на все: новый Path на каждый символ
+    // каждого кадра копил нативную память, пока сборщик мусора не доберётся до обёрток
+    private val shape = org.jetbrains.skia.Path()
 
     // Цвета текущего отрезка и буфер текста — поля, а не новые объекты на каждый отрезок каждого кадра
     private var runFg = 0
@@ -359,7 +364,7 @@ private class TerminalPainter(val m: CellMetrics, val theme: TerminalTheme, val 
             val ax = lo(cx, light) + light / 2f
             val ay = lo(cy, light) + light / 2f
             val rad = min(w, h) / 2f
-            val path = org.jetbrains.skia.Path()
+            val path = shape.rewind()
             when (cp) {
                 0x256D -> { path.moveTo(ax, y + h); path.lineTo(ax, ay + rad); path.quadTo(ax, ay, ax + rad, ay); path.lineTo(x + w, ay) }
                 0x256E -> { path.moveTo(ax, y + h); path.lineTo(ax, ay + rad); path.quadTo(ax, ay, ax - rad, ay); path.lineTo(x, ay) }
@@ -430,7 +435,7 @@ private class TerminalPainter(val m: CellMetrics, val theme: TerminalTheme, val 
     }
 
     private fun drawPowerline(c: SkCanvas, cp: Int, x: Float, y: Float, w: Float, h: Float, color: Int) {
-        val p = org.jetbrains.skia.Path()
+        val p = shape.rewind()
         line.color = color
         line.strokeWidth = max(1f, w / 10f)
         when (cp) {
@@ -560,9 +565,11 @@ fun TerminalView(
     // Мигание курсора. Каждое мигание перерисовывает всё окно, поэтому через 15 с без ввода и вывода
     // курсор замирает (как в kitty) — простаивающая консоль больше не грузит процессор.
     // Пока печатают или идёт вывод, курсор виден сплошным
-    LaunchedEffect(focused, session) {
+    // Фокус поля остаётся и когда окно уходит на задний план — там мигать незачем, а каждое мигание — кадр
+    val windowFocused = androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+    LaunchedEffect(focused && windowFocused, session) {
         blinkOn = true
-        if (!focused) return@LaunchedEffect
+        if (!focused || !windowFocused) return@LaunchedEffect
         var seen = session.version
         var activeAt = System.nanoTime()
         while (true) {
@@ -659,7 +666,7 @@ fun TerminalView(
 
     fun openLink(link: String) {
         if (link.contains("://") && !link.startsWith("file://")) {
-            runCatching { ProcessBuilder("xdg-open", link).withUserEnv().start() }
+            runCatching { ProcessBuilder(org.wexclient.app.util.systemOpenCommand(link)).withUserEnv().start() }
             return
         }
         // В ssh-сеансе пути в выводе — на сервере: одноимённый файл на этом компьютере открывать нельзя
@@ -1051,6 +1058,11 @@ fun TerminalView(
                     }
                 }
             }
+            // Свой слой: нарисованный экран переиспользуется, пока в консоли ничего не изменилось.
+            // Без него всё содержимое консоли рисовалось заново в каждом кадре окна — от снега,
+            // анимаций и мигания где угодно (замер: 185 перерисовок на 200 кадров, со слоем — 0),
+            // и каждый раз под блокировкой буфера, за которую борется поток эмулятора
+            .graphicsLayer()
             .drawBehind {
                 // Чтение версии здесь — перерисовка без перекомпоновки
                 session.version

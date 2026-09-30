@@ -21,6 +21,11 @@ import org.wexclient.app.vfs.archive.TarFileSystemProvider
 import org.wexclient.app.util.startHelper
 
 class VfsManager {
+    companion object {
+        /** Ошибка «чтение прервали» — результат выбрасывают, показывать её не нужно. */
+        const val CANCELLED = "\u0000cancelled"
+    }
+
     // Открытые ZipFileSystem. Ключ — ФС, где лежит файл архива, + путь в ней:
     // у вложенных архивов (base.apk внутри разных XAPK) одни и те же пути.
     private data class ArchiveKey(val hostFs: FileSystem, val path: String)
@@ -179,8 +184,8 @@ class VfsManager {
     fun archiveLabel(path: Path): String? {
         val fs = live(path).fileSystem
         if (fs === FileSystems.getDefault()) return null
-        // Папка на сервере: в строке пути видно, какой это сервер
-        if (fs is org.wexclient.app.vfs.ssh.SshFileSystem) return "SSH " + fs.target.label
+        // Папка на сервере или телефоне: в строке пути видно, где именно
+        if (fs is org.wexclient.app.vfs.remote.RemoteFileSystem) return fs.title
         if (fs is TarFileSystem) return fs.label
         val name = sourceOf[fs]?.fileName?.toString() ?: return "ZIP"
         return ArchiveFormats.label(name)
@@ -242,6 +247,8 @@ class VfsManager {
             try {
                 val fresh = newArchiveFs(liveSrc)
                 registerLocked(fresh, liveSrc)
+                // Ссылавшиеся на old — сразу на fresh: цепочка old→…→fresh держала бы все прежние версии
+                successors.replaceAll { _, next -> if (next === old) fresh else next }
                 successors[old] = fresh
                 events.add(old to fresh)
             } catch (e: Exception) {
@@ -417,7 +424,7 @@ class VfsManager {
     private fun ensureNotStale(touched: Array<out Path>) {
         for (p in touched) {
             val fs = p.fileSystem
-            if (fs === FileSystems.getDefault() || fs is org.wexclient.app.vfs.ssh.SshFileSystem) continue
+            if (fs === FileSystems.getDefault() || fs is org.wexclient.app.vfs.remote.RemoteFileSystem) continue
             val staleSource = synchronized(lock) {
                 val top = topArchiveLocked(fs) ?: return@synchronized null
                 if (isStaleLocked(top)) archiveSourceMap[top] else null
@@ -463,8 +470,10 @@ class VfsManager {
     /**
      * Содержимое папки и ошибка чтения (нет прав, папку удалили) — чтобы панель не показывала
      * недоступную папку пустой. [sorted] = false — порядок наведёт вызывающий.
+     * [cancelled] спрашивается каждые 256 элементов: из папки на 50 000 файлов ушли — её stat бросаем,
+     * а не держим ими очередь чтения следующей папки. Прерванное чтение возвращает ошибку [CANCELLED].
      */
-    fun listEntriesChecked(dir: Path, sorted: Boolean = false): Pair<List<VfsEntry>, String?> {
+    fun listEntriesChecked(dir: Path, sorted: Boolean = false, cancelled: () -> Boolean = { false }): Pair<List<VfsEntry>, String?> {
         var error: String? = null
         val entries = mutableListOf<VfsEntry>()
         var path = live(dir)
@@ -496,7 +505,9 @@ class VfsManager {
             }
 
             Files.newDirectoryStream(path).use { stream ->
+                var seen = 0
                 for (item in stream) {
+                    if ((++seen and 255) == 0 && cancelled()) return entries to CANCELLED
                     // Один stat на элемент; битая ссылка — атрибуты самой ссылки
                     val attrs = try {
                         Files.readAttributes(item, BasicFileAttributes::class.java)
@@ -512,9 +523,9 @@ class VfsManager {
                     val special = attrs?.isOther == true
                     val name = item.fileName?.toString() ?: ""
                     // Без второго обращения к диску: атрибуты уже есть
-                    // Архив на сервере внутрь не открываем: zip требует произвольного доступа к файлу,
+                    // Архив на сервере или телефоне внутрь не открываем: zip требует произвольного доступа к файлу,
                     // поэтому он открывается из скачанной копии, как и прочие файлы
-                    val remote = path.fileSystem is org.wexclient.app.vfs.ssh.SshFileSystem
+                    val remote = path.fileSystem is org.wexclient.app.vfs.remote.RemoteFileSystem
                     val isArch = !special && !isDir && !remote && ArchiveFormats.isBrowsable(name)
                     val size = if (attrs != null && !isDir && !special) attrs.size() else 0L
                     val lastMod = attrs?.lastModifiedTime()?.toMillis() ?: 0L
@@ -543,22 +554,25 @@ class VfsManager {
         if (!sorted) return entries to error
 
         val hasAndroidPackageFiles = isInsideArchive(path) || entries.any {
-            val n = it.name.lowercase()
-            n == "androidmanifest.xml" || n.endsWith(".dex") || n == "resources.arsc"
+            val n = it.name
+            n.equals("androidmanifest.xml", ignoreCase = true) || n.endsWith(".dex", ignoreCase = true) ||
+                n.equals("resources.arsc", ignoreCase = true)
         }
 
+        // Ключ имени — один раз на элемент, а не lowercase() в каждом сравнении (2·n·log n строк)
+        val lower = HashMap<VfsEntry, String>(entries.size * 2)
+        val byName = Comparator<VfsEntry> { x, y ->
+            lower.getOrPut(x) { x.name.lowercase() }.compareTo(lower.getOrPut(y) { y.name.lowercase() })
+        }
         // Sort: In APK/Android archives: Folders -> AndroidManifest.xml -> DEX -> resources.arsc -> others
         val ordered = if (hasAndroidPackageFiles) {
             entries.sortedWith(
-                compareBy<VfsEntry> { it.apkItemPriority }
-                    .thenBy { it.dexNaturalIndex }
-                    .thenBy { it.name.lowercase() }
+                Comparator<VfsEntry> { x, y -> x.apkItemPriority.compareTo(y.apkItemPriority) }
+                    .then { x, y -> x.dexNaturalIndex.compareTo(y.dexNaturalIndex) }
+                    .then(byName)
             )
         } else {
-            entries.sortedWith(
-                compareBy<VfsEntry> { !it.isDirectory && !it.isArchive }
-                    .thenBy { it.name.lowercase() }
-            )
+            entries.sortedWith(compareBy<VfsEntry> { !it.isDirectory && !it.isArchive }.then(byName))
         }
         return ordered to error
     }
@@ -781,10 +795,13 @@ class VfsManager {
         exclusive(entry) {
             val p = live(entry)
             writing(p) {
-                val remote = p.fileSystem as? org.wexclient.app.vfs.ssh.SshFileSystem
+                val remote = p.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem
                 when {
-                    // На сервере — одной командой: rm -rf в ссылки не заходит, и нет запуска ssh на каждый файл
+                    // На сервере и телефоне — одной командой: rm -rf в ссылки не заходит, и нет отдельной команды на каждый файл
                     remote != null -> remote.deleteTree(p)
+                    // Windows: junction и «только чтение» — см. FileTree.deleteOrThrow
+                    java.io.File.separatorChar == '\\' && Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS) ->
+                        org.wexclient.app.util.FileTree.deleteOrThrow(p)
                     // Ссылка на папку — удаляется сама ссылка, без захода внутрь
                     Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS) -> Files.walk(p).use { stream ->
                         stream.sorted(Comparator.reverseOrder())
@@ -848,9 +865,9 @@ class VfsManager {
         if (to.startsWith(from)) throw IllegalArgumentException("Нельзя $action папку «${src.fileName}» внутрь неё самой")
     }
 
-    /** Есть ли источник на самом деле: на сервере «нет» из кэша перепроверяется у сервера. */
+    /** Есть ли источник на самом деле: на сервере и телефоне «нет» из кэша перепроверяется там. */
     private fun sourceExists(p: Path): Boolean {
-        (p.fileSystem as? org.wexclient.app.vfs.ssh.SshFileSystem)?.let { return it.existsNow(p) }
+        (p.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem)?.let { return it.existsNow(p) }
         return Files.exists(p, LinkOption.NOFOLLOW_LINKS)
     }
 
@@ -871,8 +888,9 @@ class VfsManager {
     private fun copyTree(src: Path, target: Path) {
         val localTarget = target.fileSystem === FileSystems.getDefault()
         // На диск и на сервер ссылка копируется ссылкой (как cp -P, rsync -l, Dolphin, Nautilus); путь —
-        // в ФС назначения (ссылка из tar иначе падала с ProviderMismatchException). В архив — то, на что указывает.
-        val linksAsLinks = localTarget || target.fileSystem is org.wexclient.app.vfs.ssh.SshFileSystem
+        // в ФС назначения (ссылка из tar иначе падала с ProviderMismatchException). В архив и в память
+        // телефона, где ссылок не бывает, — то, на что указывает.
+        val linksAsLinks = localTarget || (target.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem)?.keepsLinks == true
         fun linkLike(s: Path, dest: Path) {
             Files.deleteIfExists(dest)
             Files.createSymbolicLink(dest, dest.fileSystem.getPath(Files.readSymbolicLink(s).toString()))
@@ -888,7 +906,8 @@ class VfsManager {
             if (Files.isDirectory(dest)) return
             dest.parent?.let { if (!Files.isDirectory(it)) Files.createDirectories(it) }
             val perms = posixPermissionsOf(s)
-            if (perms != null && localTarget) {
+            // NTFS прав POSIX не знает: папка из tar, с сервера или телефона создаётся без них
+            if (perms != null && localTarget && "posix" in dest.fileSystem.supportedFileAttributeViews()) {
                 // Закрытая папка (0700) не становится открытой даже на время копирования
                 Files.createDirectory(dest, PosixFilePermissions.asFileAttribute(perms + OWNER_RWX))
             } else {

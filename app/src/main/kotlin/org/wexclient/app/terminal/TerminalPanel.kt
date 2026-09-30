@@ -98,7 +98,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.Properties
 import java.util.concurrent.atomic.AtomicInteger
-import org.wexclient.app.vfs.ssh.SshFileSystem
+import org.wexclient.app.vfs.remote.RemoteFileSystem
 
 /** Настройки консоли (~/.config/wexdesktop/terminal.properties). */
 object TerminalPreferences {
@@ -197,8 +197,8 @@ object TerminalFocus {
 
 private val sessionIds = AtomicInteger()
 
-/** Сервер, на котором лежит папка (user@host), или null для папки на этом компьютере. */
-private fun remoteOf(dir: Path): String? = (dir.fileSystem as? SshFileSystem)?.target?.label
+/** Где лежит папка («ssh user@host», «adb Pixel 9») или null для папки на этом компьютере. */
+private fun remoteOf(dir: Path): String? = (dir.fileSystem as? RemoteFileSystem)?.let { "${it.kind} ${it.label}" }
 
 /** Вкладки консоли одной панели. */
 class TerminalPanelState(val paneName: String) {
@@ -217,7 +217,7 @@ class TerminalPanelState(val paneName: String) {
     fun show(dir: Path) {
         val server = remoteOf(dir)
         if (server != null) {
-            // Серверная панель — вкладка этого сервера, если уже открыта, иначе новый ssh-сеанс
+            // Панель на сервере или телефоне — вкладка этой стороны, если уже открыта, иначе новый сеанс там
             val idx = sessions.indexOfFirst { it.remote == server && it.exitCode == null }
             if (idx >= 0) activeIndex = idx else newSession(dir)
         } else if (sessions.isEmpty()) {
@@ -238,13 +238,13 @@ class TerminalPanelState(val paneName: String) {
 
     fun newSession(dir: Path, shell: String = TerminalPreferences.shell) {
         val home = Paths.get(System.getProperty("user.home"))
-        val server = dir.fileSystem as? SshFileSystem
+        val server = dir.fileSystem as? RemoteFileSystem
         val session = if (server != null) {
-            // Папка на сервере — консоль там же: ssh по соединению панели, сразу в эту папку
+            // Папка на сервере или телефоне — консоль там же (ssh по соединению панели, adb shell), сразу в эту папку
             TerminalSession(
                 sessionIds.incrementAndGet(), home, shell,
                 command = server.connection.shellCommand(dir.toAbsolutePath().toString()),
-                remote = server.target.label
+                remote = remoteOf(dir)
             )
         } else {
             TerminalSession(sessionIds.incrementAndGet(), dir.takeIf { it.fileSystem == FileSystems.getDefault() } ?: home, shell)
@@ -261,7 +261,7 @@ class TerminalPanelState(val paneName: String) {
      */
     fun runCommand(dir: Path, command: String) {
         val current = active
-        // Вкладка должна быть там же, где папка: локальная — для диска, ssh этого сервера — для сервера
+        // Вкладка должна быть там же, где папка: локальная — для диска, сеанс этой стороны — для сервера и телефона
         val session = if (current != null && current.exitCode == null && current.remote == remoteOf(dir) && !current.isBusy()) {
             current
         } else {
@@ -387,7 +387,7 @@ private fun SessionTab(session: TerminalSession, selected: Boolean, onSelect: ()
         Icon(Icons.Default.Terminal, null, tint = iconTint, modifier = Modifier.size(13.dp))
         Spacer(Modifier.width(5.dp))
         Text(
-            session.title.ifBlank { session.shell.substringAfterLast('/') },
+            session.title.ifBlank { ShellLocator.displayName(session.shell) },
             fontSize = 11.sp,
             fontFamily = AppFonts.JetBrainsMono,
             color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -454,11 +454,15 @@ fun TerminalPanel(
         if (!TerminalPreferences.followPane) return@LaunchedEffect
         val s = state.active ?: return@LaunchedEffect
         if (currentDir.fileSystem != FileSystems.getDefault()) return@LaunchedEffect
-        // ssh-сеанс работает на сервере: локальный cd туда набирать нельзя
+        // Сеанс на сервере или телефоне: локальный cd туда набирать нельзя
         if (s.remote != null) return@LaunchedEffect
         delay(150)
-        val cwd = s.currentDirectory()
-        if (cwd != null && runCatching { cwd.toRealPath() == currentDir.toRealPath() }.getOrDefault(false)) return@LaunchedEffect
+        // /proc и toRealPath — на диске: зависшая сетевая папка на пути не должна вешать окно
+        val same = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val cwd = s.currentDirectory()
+            cwd != null && runCatching { cwd.toRealPath() == currentDir.toRealPath() }.getOrDefault(false)
+        }
+        if (same) return@LaunchedEffect
         if (s.pid != null) s.changeDirectory(currentDir)
     }
 

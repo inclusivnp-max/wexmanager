@@ -11,8 +11,8 @@ class DiskSpace(val free: Long, val total: Long) {
     companion object {
         /** null — внутри архива или раздел не отвечает. */
         fun of(path: Path): DiskSpace? {
-            // На сервере место спрашиваем у df — видно, сколько осталось на его диске
-            val remote = path.fileSystem as? org.wexclient.app.vfs.ssh.SshFileSystem
+            // На сервере и телефоне место спрашиваем у df — видно, сколько осталось там
+            val remote = path.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem
             if (remote != null) {
                 return runCatching { remote.connection.diskSpace(path.toAbsolutePath().toString()) }
                     .getOrNull()?.let { (free, total) -> DiskSpace(free, total) }?.takeIf { it.total > 0 }

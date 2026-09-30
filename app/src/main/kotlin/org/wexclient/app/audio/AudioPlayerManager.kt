@@ -49,7 +49,22 @@ object AudioPlayerManager {
     var isPaused by mutableStateOf(false)
         private set
 
-    var currentPositionMs by mutableStateOf(0L)
+    private val positionMs = mutableStateOf(0L)
+
+    /** Позиция воспроизведения; пишется 5 раз в секунду — для ползунка в окне плеера. */
+    var currentPositionMs: Long
+        get() = positionMs.value
+        private set(value) {
+            positionMs.value = value
+            val sec = value / 1000
+            if (sec != positionSeconds) positionSeconds = sec
+        }
+
+    /**
+     * Та же позиция с точностью до секунды — для мини-плеера главного окна: он показывает только секунды,
+     * а каждое изменение состояния — кадр всего окна (5 в секунду всю песню, даже в свёрнутом окне).
+     */
+    var positionSeconds by mutableStateOf(0L)
         private set
 
     var totalDurationMs by mutableStateOf(0L)

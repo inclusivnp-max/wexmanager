@@ -422,7 +422,7 @@ fun BundleConvertDialog(
                                 modifier = Modifier.fillMaxWidth().height(6.dp)
                             )
                         } else {
-                            LinearProgressIndicator(
+                            WexLinearSpinner(
                                 color = NoctaliaPrimary,
                                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
                                 modifier = Modifier.fillMaxWidth().height(6.dp)

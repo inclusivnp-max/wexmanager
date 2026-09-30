@@ -108,7 +108,17 @@ object SearchEngine {
         return Pattern.compile(body, flags)
     }
 
-    fun findAll(text: String, o: SearchOptions, timeoutMs: Long = 3000, cancelled: () -> Boolean = { false }): SearchMatches {
+    /**
+     * Все совпадения; [within] — только внутри этого куска (поиск в выделении). Границы куска для
+     * выражения прозрачны: \b, ^ и просмотр назад видят текст вокруг, а не обрыв.
+     */
+    fun findAll(
+        text: String,
+        o: SearchOptions,
+        timeoutMs: Long = 3000,
+        cancelled: () -> Boolean = { false },
+        within: IntRange? = null
+    ): SearchMatches {
         if (o.query.isEmpty()) return SearchMatches.EMPTY
         val pattern = try {
             compile(o)
@@ -118,17 +128,18 @@ object SearchEngine {
         var arr = IntArray(64)
         var n = 0
         val m = pattern.matcher(TimedText.of(text, timeoutMs, cancelled))
-        var from = 0
+        m.useTransparentBounds(true).useAnchoringBounds(false)
+        if (within != null) {
+            val a = within.first.coerceIn(0, text.length)
+            m.region(a, (within.last + 1).coerceIn(a, text.length))
+        }
         var truncated = false
         try {
-            while (from <= text.length && m.find(from)) {
+            // find() сам шагает дальше после пустого совпадения (^, \b) — их не показываем
+            while (m.find()) {
                 val s = m.start()
                 val e = m.end()
-                if (e == s) {
-                    // Пустые совпадения (^, \b) не показываем, но и не зацикливаемся
-                    from = s + 1
-                    continue
-                }
+                if (e == s) continue
                 if (n / 2 >= LIMIT) {
                     truncated = true
                     break
@@ -136,7 +147,6 @@ object SearchEngine {
                 if (n + 2 > arr.size) arr = arr.copyOf(arr.size * 2)
                 arr[n++] = s
                 arr[n++] = e
-                from = e
             }
         } catch (e: StackOverflowError) {
             return SearchMatches(IntArray(0), 0, "Слишком сложное регулярное выражение", false)
@@ -203,7 +213,10 @@ object SearchEngine {
         if (o.query.isEmpty()) return text to 0
         val pattern = compile(o)
         val m = pattern.matcher(TimedText.of(text, timeoutMs, cancelled))
-        if (within != null) m.region(within.first, within.last + 1)
+        if (within != null) {
+            val a = within.first.coerceIn(0, text.length)
+            m.useTransparentBounds(true).useAnchoringBounds(false).region(a, (within.last + 1).coerceIn(a, text.length))
+        }
         val sb = StringBuilder(text.length)
         var count = 0
         val repl = if (o.regex) expandEscapes(replacement) else Matcher.quoteReplacement(replacement)

@@ -1,6 +1,7 @@
 package org.wexclient.app.util
 
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.Rect
@@ -33,7 +34,7 @@ object ImageScale {
                     image, Rect.makeWH(w.toFloat(), h.toFloat()), Rect.makeWH(tw.toFloat(), th.toFloat()),
                     SamplingMode.MITCHELL, null, true
                 )
-                surface.makeImageSnapshot().use { return it.toComposeImageBitmap() }
+                surface.makeImageSnapshot().use { return it.toComposeImageBitmap().frozen() }
             } finally {
                 surface.close()
             }
@@ -44,3 +45,12 @@ object ImageScale {
         }
     }
 }
+
+/**
+ * Картинка готова, рисовать в неё больше не будут — помечаем неизменяемой. Compose рисует ImageBitmap
+ * через Image.makeFromBitmap на каждом кадре; у изменяемого Bitmap (а toComposeImageBitmap даёт именно
+ * такой) Skia копирует все пиксели и получает новую картинку, которую заново грузит в видеопамять:
+ * обои 2560×1440 — 15 МБ копирования и загрузки на каждый кадр, миниатюры — на каждый кадр каждая.
+ * У неизменяемого пиксели общие, а текстура берётся из кэша GPU.
+ */
+fun ImageBitmap.frozen(): ImageBitmap = apply { asSkiaBitmap().setImmutable() }

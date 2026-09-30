@@ -31,10 +31,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.DataArray
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.FactCheck
+import androidx.compose.material.icons.automirrored.filled.FactCheck
 import androidx.compose.material.icons.filled.FindInPage
 import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Highlight
+import androidx.compose.material.icons.filled.HighlightAlt
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.SpaceBar
@@ -98,6 +100,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -166,12 +169,18 @@ internal fun ToolIcon(
             androidx.compose.animation.core.tween(org.wexclient.app.ui.Motion.TINT),
             label = "tool-icon-glow"
         )
-        IconButton(
-            onClick = onClick,
-            enabled = enabled,
-            modifier = Modifier.size(size).background(glow, RoundedCornerShape(6.dp))
+        // IconButton сам раздвигается до 48 dp (зона касания Material), и подсветка рисовалась
+        // по этому размеру: квадрат шире кнопки, обрезанный панелью сверху и снизу. Кнопка — ровно size
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.material3.LocalMinimumInteractiveComponentSize provides Dp.Unspecified
         ) {
-            Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(16.dp))
+            IconButton(
+                onClick = onClick,
+                enabled = enabled,
+                modifier = Modifier.size(size).background(glow, RoundedCornerShape(6.dp))
+            ) {
+                Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(16.dp))
+            }
         }
     }
 }
@@ -222,32 +231,43 @@ internal fun EditorInputField(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ToggleChip(label: String, hint: String, active: Boolean, onClick: () -> Unit) {
+private fun ToggleChip(label: String, hint: String, active: Boolean, icon: ImageVector? = null, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(width = 28.dp, height = 24.dp)
-            .background(
-                when {
-                    active -> NoctaliaPrimary.copy(alpha = 0.22f)
-                    hovered -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
-                    else -> Color.Transparent
-                },
-                RoundedCornerShape(5.dp)
-            )
-            .hoverable(interaction)
-            .clickable(onClick = onClick)
+    val tint = if (active) NoctaliaPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+        tooltip = {
+            PlainTooltip(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.onSurface
+            ) { Text(hint, fontSize = 11.sp) }
+        },
+        state = rememberTooltipState()
     ) {
-        Text(
-            label,
-            fontSize = 11.sp,
-            fontFamily = AppFonts.JetBrainsMono,
-            fontWeight = FontWeight.Bold,
-            color = if (active) NoctaliaPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(width = 28.dp, height = 24.dp)
+                .background(
+                    when {
+                        active -> NoctaliaPrimary.copy(alpha = 0.22f)
+                        hovered -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                        else -> Color.Transparent
+                    },
+                    RoundedCornerShape(5.dp)
+                )
+                .hoverable(interaction)
+                .clickable(onClick = onClick)
+        ) {
+            if (icon != null) {
+                Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(15.dp))
+            } else {
+                Text(label, fontSize = 11.sp, fontFamily = AppFonts.JetBrainsMono, fontWeight = FontWeight.Bold, color = tint)
+            }
+        }
     }
 }
 
@@ -327,6 +347,8 @@ class FindState {
     var caseSensitive by mutableStateOf(false)
     var wholeWord by mutableStateOf(false)
     var regex by mutableStateOf(false)
+    /** Искать только в области, выделенной при включении (область хранит редактор). */
+    var inSelection by mutableStateOf(false)
 
     val options: SearchOptions get() = SearchOptions(query, caseSensitive, wholeWord, regex)
 }
@@ -342,14 +364,45 @@ internal fun FindBar(
     onPrev: () -> Unit,
     onReplace: () -> Unit,
     onReplaceAll: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    /** «В выделении»: включить (область — текущее выделение) или выключить. */
+    onToggleInSelection: () -> Unit = {},
+    /** Каретки на все совпадения. */
+    onSelectAll: () -> Unit = {},
+    /** Сочетания редактора, нажатые в поле поиска (Ctrl+S и т. п.): поле их само не знает. */
+    onEditorKey: (KeyEvent) -> Boolean = { false }
 ) {
     val replaceFocus = remember { FocusRequester() }
+    var focusField by remember { mutableStateOf<FocusRequester?>(null) }
+    LaunchedEffect(focusField, state.replaceVisible) {
+        val target = focusField ?: return@LaunchedEffect
+        if (target === replaceFocus && !state.replaceVisible) return@LaunchedEffect
+        requestFocusSafely(target)
+        focusField = null
+    }
     fun keys(e: KeyEvent, isReplace: Boolean): Boolean {
         if (e.type != KeyEventType.KeyDown) return false
+        // Ctrl+F / Ctrl+R прямо из строки поиска — переход между полями, а не пустое нажатие
+        when (Keymap.action(e, Keymap.GROUP_EDITOR)) {
+            "editor.find" -> {
+                focusField = focusRequester
+                return true
+            }
+            "editor.replace" -> if (!readOnly) {
+                state.replaceVisible = true
+                focusField = replaceFocus
+                return true
+            }
+            "editor.findInSelection" -> {
+                onToggleInSelection()
+                return true
+            }
+        }
         return when (e.key) {
+            // Alt+Enter — каретки на все совпадения (как в VS Code)
             Key.Enter, Key.NumPadEnter -> {
-                if (isReplace) onReplace() else if (e.isShiftPressed) onPrev() else onNext()
+                if (e.isAltPressed) onSelectAll()
+                else if (isReplace) onReplace() else if (e.isShiftPressed) onPrev() else onNext()
                 true
             }
             Key.Escape -> {
@@ -358,7 +411,7 @@ internal fun FindBar(
             Key.F3 -> {
                 if (e.isShiftPressed) onPrev() else onNext(); true
             }
-            else -> false
+            else -> onEditorKey(e)
         }
     }
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
@@ -373,11 +426,19 @@ internal fun FindBar(
                     focusRequester = focusRequester,
                     error = matches.error != null || (state.query.isNotEmpty() && matches.count == 0),
                     onKey = { keys(it, false) },
-                    modifier = Modifier.width(320.dp),
+                    // Шире поля замены: справа ещё четыре переключателя
+                    modifier = Modifier.width(380.dp),
                     trailing = {
                         ToggleChip("Aa", "Учитывать регистр", state.caseSensitive) { state.caseSensitive = !state.caseSensitive }
                         ToggleChip("W", "Слово целиком", state.wholeWord) { state.wholeWord = !state.wholeWord }
                         ToggleChip(".*", "Регулярное выражение", state.regex) { state.regex = !state.regex }
+                        ToggleChip(
+                            "",
+                            "В выделении (" + Keymap.label("editor.findInSelection") + ")",
+                            state.inSelection,
+                            icon = Icons.Default.HighlightAlt,
+                            onClick = onToggleInSelection
+                        )
                     }
                 )
                 Spacer(Modifier.width(8.dp))
@@ -399,6 +460,7 @@ internal fun FindBar(
                 )
                 ToolIcon(Icons.Default.ArrowUpward, "Предыдущее (Shift+Enter)", enabled = matches.count > 0, onClick = onPrev)
                 ToolIcon(Icons.Default.ArrowDownward, "Следующее (Enter)", enabled = matches.count > 0, onClick = onNext)
+                ToolIcon(Icons.Default.SelectAll, "Каретки на все совпадения (Alt+Enter)", enabled = matches.count > 0, onClick = onSelectAll)
                 if (!readOnly) {
                     ToolIcon(Icons.Default.FindReplace, "Замена (Ctrl+R)", active = state.replaceVisible) {
                         state.replaceVisible = !state.replaceVisible
@@ -417,7 +479,7 @@ internal fun FindBar(
                         placeholder = if (state.regex) "Заменить на… ($1 — группа)" else "Заменить на…",
                         focusRequester = replaceFocus,
                         onKey = { keys(it, true) },
-                        modifier = Modifier.width(320.dp)
+                        modifier = Modifier.width(380.dp)
                     )
                     Spacer(Modifier.width(8.dp))
                     SmallButton("Заменить", enabled = matches.count > 0, onClick = onReplace)
@@ -736,7 +798,9 @@ internal fun EditorStatusBar(
     val line = snap.lineOf(caret)
     val col = TextOps.columnOf(v.text, caret, EditorPreferences.tabSize) + 1
     val selLen = v.selection.length
-    val selLines = if (selLen > 0) v.text.substring(v.selection.min, v.selection.max).count { it == '\n' } + 1 else 0
+    // По разметке строк, а не копией выделения: после Ctrl+A на большом файле строка состояния
+    // копировала весь текст на каждую перерисовку
+    val selLines = if (selLen > 0) snap.lineOf(v.selection.max) - snap.lineOf(v.selection.min) + 1 else 0
     val diags = ctrl.diagnostics
     val errors = diags.count { it.severity == Severity.ERROR }
     val warnings = diags.size - errors
@@ -751,6 +815,8 @@ internal fun EditorStatusBar(
             modifier = Modifier.fillMaxWidth().height(26.dp).padding(horizontal = 8.dp)
         ) {
             StatusCell("${line + 1}:$col", "Перейти к строке (Ctrl+G)", onClick = onGoto)
+            val caretCount = ctrl.extraCarets.size + 1
+            if (caretCount > 1) StatusText("кареток: $caretCount", NoctaliaTertiary)
             if (selLen > 0) {
                 StatusText("$selLen симв." + if (selLines > 1) ", $selLines стр." else "", outlined)
             }
@@ -1013,25 +1079,33 @@ internal fun ToolsMenu(
     WexDropdownMenu(expanded = expanded, onDismissRequest = onDismiss, modifier = Modifier.heightIn(max = 640.dp)) {
         val groups: List<Pair<String, List<Triple<String, String, EditorAction>>>> = listOf(
             "Правка" to listOf(
-                Triple("Дублировать строку/выделение", "Ctrl+D", EditorAction.Duplicate),
-                Triple("Удалить строку", "Ctrl+Y", EditorAction.DeleteLine),
-                Triple("Переместить строку вверх", "Alt+Shift+↑", EditorAction.MoveUp),
-                Triple("Переместить строку вниз", "Alt+Shift+↓", EditorAction.MoveDown),
+                // Сочетания, которые можно переназначить, — из биндов, а не записанные здесь
+                Triple("Дублировать строку/выделение", Keymap.label("editor.duplicate"), EditorAction.Duplicate),
+                Triple("Удалить строку", Keymap.label("editor.deleteLine"), EditorAction.DeleteLine),
+                Triple("Переместить строку вверх", Keymap.label("editor.moveUp"), EditorAction.MoveUp),
+                Triple("Переместить строку вниз", Keymap.label("editor.moveDown"), EditorAction.MoveDown),
                 Triple("Объединить строки", "Ctrl+Shift+J", EditorAction.JoinLines),
                 Triple("Расширить выделение", "Ctrl+W", EditorAction.ExpandSelection),
                 Triple("Сузить выделение", "Ctrl+Shift+W", EditorAction.ShrinkSelection)
             ),
             "Код" to listOf(
-                Triple("Автодополнение", "Ctrl+Space", EditorAction.Complete),
-                Triple("Форматировать", "Ctrl+Alt+L", EditorAction.Format),
-                Triple("Закомментировать строки", "Ctrl+/", EditorAction.LineComment),
+                Triple("Автодополнение", Keymap.label("editor.complete"), EditorAction.Complete),
+                Triple("Форматировать", Keymap.label("editor.format"), EditorAction.Format),
+                Triple("Закомментировать строки", Keymap.label("editor.comment"), EditorAction.LineComment),
                 Triple("Блочный комментарий", "Ctrl+Shift+/", EditorAction.BlockComment),
                 Triple("Переименовать вхождения", "Shift+F6", EditorAction.Rename),
                 Triple("К парной скобке", "Ctrl+Shift+M", EditorAction.MatchingBracket),
                 Triple("Следующая ошибка", "F2", EditorAction.NextError),
                 Triple("Предыдущая ошибка", "Shift+F2", EditorAction.PrevError),
-                Triple("Перейти к строке", "Ctrl+G", EditorAction.GotoLine),
-                Triple("Структура файла", "Ctrl+F12", EditorAction.StructurePopup)
+                Triple("Перейти к строке", Keymap.label("editor.goto"), EditorAction.GotoLine),
+                Triple("Структура файла", Keymap.label("editor.structure"), EditorAction.StructurePopup)
+            ),
+            "Несколько кареток" to listOf(
+                Triple("Каретка на следующее вхождение", Keymap.label("editor.nextOccurrence"), EditorAction.NextOccurrence),
+                Triple("Каретки на все вхождения", Keymap.label("editor.allOccurrences"), EditorAction.AllOccurrences),
+                Triple("Добавить каретку выше", Keymap.label("editor.caretAbove"), EditorAction.CaretAbove),
+                Triple("Добавить каретку ниже", Keymap.label("editor.caretBelow"), EditorAction.CaretBelow),
+                Triple("Каретки в концы выделенных строк", Keymap.label("editor.caretsLineEnds"), EditorAction.CaretsLineEnds)
             ),
             "Свёртка" to listOf(
                 Triple("Свернуть блок", "Ctrl+Shift+[", EditorAction.Fold),
@@ -1078,7 +1152,8 @@ internal fun ToolsMenu(
 private val READ_ONLY_ACTIONS = setOf(
     EditorAction.ExpandSelection, EditorAction.ShrinkSelection, EditorAction.MatchingBracket, EditorAction.NextError,
     EditorAction.PrevError, EditorAction.GotoLine, EditorAction.StructurePopup, EditorAction.Fold, EditorAction.Unfold,
-    EditorAction.FoldAll, EditorAction.UnfoldAll
+    EditorAction.FoldAll, EditorAction.UnfoldAll, EditorAction.NextOccurrence, EditorAction.AllOccurrences,
+    EditorAction.CaretAbove, EditorAction.CaretBelow, EditorAction.CaretsLineEnds
 )
 
 @Composable
@@ -1103,7 +1178,7 @@ internal fun ViewMenu(expanded: Boolean, onDismiss: () -> Unit) {
         HorizontalDivider()
         MenuSection("Проверка кода")
         MenuToggle("Ошибки на лету", p.diagnostics, Icons.Default.ErrorOutline) { p.updateDiagnostics(it) }
-        MenuToggle("Внешние проверщики", p.externalChecks, Icons.Default.FactCheck) { p.updateExternalChecks(it) }
+        MenuToggle("Внешние проверщики", p.externalChecks, Icons.AutoMirrored.Filled.FactCheck) { p.updateExternalChecks(it) }
     }
 }
 
@@ -1114,7 +1189,8 @@ enum class EditorAction {
     Fold, Unfold, FoldAll, UnfoldAll,
     SortAsc, SortDesc, Unique, Reverse, RemoveBlank, TrimTrailing,
     ToggleCase, Camel, Pascal, Snake, Screaming, Kebab,
-    Base64Encode, Base64Decode, UrlEncode, UrlDecode, HexEncode, HexDecode, Escape, Unescape, UnicodeUnescape
+    Base64Encode, Base64Decode, UrlEncode, UrlDecode, HexEncode, HexDecode, Escape, Unescape, UnicodeUnescape,
+    NextOccurrence, AllOccurrences, CaretAbove, CaretBelow, CaretsLineEnds
 }
 
 // ---------------- Верхняя панель ----------------
@@ -1197,7 +1273,7 @@ internal fun EditorToolbar(
             ToolIcon(Icons.AutoMirrored.Filled.Toc, "Структура (Alt+7)", active = EditorPreferences.showOutline) {
                 EditorPreferences.updateShowOutline(!EditorPreferences.showOutline)
             }
-            ToolIcon(Icons.AutoMirrored.Filled.WrapText, "Перенос строк (Alt+Z)", active = EditorPreferences.softWrap) {
+            ToolIcon(Icons.AutoMirrored.Filled.WrapText, "Перенос строк (" + Keymap.label("editor.wrap") + ")", active = EditorPreferences.softWrap) {
                 EditorPreferences.updateSoftWrap(!EditorPreferences.softWrap)
             }
             ToolIcon(Icons.Default.Map, "Миникарта", active = EditorPreferences.showMinimap) {

@@ -26,6 +26,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -114,6 +115,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.alpha
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.awt.awtEventOrNull
@@ -212,7 +214,7 @@ fun FilePaneView(
     /** Корзина из панели быстрого доступа. */
     onOpenTrash: (() -> Unit)? = null,
     /** Отключиться от сервера, на котором сейчас панель. */
-    onDisconnect: ((org.wexclient.app.vfs.ssh.SshFileSystem) -> Unit)? = null,
+    onDisconnect: ((org.wexclient.app.vfs.remote.RemoteFileSystem) -> Unit)? = null,
     /** Файлы бросили в папку (из этой панели, соседней или другой программы). */
     onDropFiles: ((paths: List<Path>, targetDir: Path, action: DropAction) -> Unit)? = null,
     /** Перетаскивание из панели закончилось (файлы могли унести в другую программу). */
@@ -224,13 +226,14 @@ fun FilePaneView(
     footerInsetEnd: androidx.compose.ui.unit.Dp = 0.dp,
     modifier: Modifier = Modifier
 ) {
-    // Переход между панелями по Tab виден плавно, а не скачком
-    val borderColor by androidx.compose.animation.animateColorAsState(
+    // Переход между панелями по Tab виден плавно, а не скачком. Значения — State, читаются при рисовании
+    // рамки: иначе каждый кадр анимации перекомпоновывал всю панель (и обе при смене активной)
+    val borderColor = androidx.compose.animation.animateColorAsState(
         targetValue = if (isActive) NoctaliaPrimary else MaterialTheme.colorScheme.outlineVariant,
         animationSpec = tween(Motion.TINT),
         label = "pane-border"
     )
-    val borderWidth by androidx.compose.animation.core.animateDpAsState(
+    val borderWidth = androidx.compose.animation.core.animateDpAsState(
         targetValue = if (isActive) 2.dp else 1.dp,
         animationSpec = tween(Motion.TINT),
         label = "pane-border-width"
@@ -287,7 +290,8 @@ fun FilePaneView(
     LaunchedEffect(ViewPreferences.listVersion) {
         if (seenListVersion != ViewPreferences.listVersion) {
             seenListVersion = ViewPreferences.listVersion
-            state.refresh()
+            // Порядок и состав из уже прочитанного — диск заново не читаем
+            state.refresh(source = ListSource.REARRANGE)
         }
     }
 
@@ -389,8 +393,8 @@ fun FilePaneView(
 
     fun resolveEnteredPath(raw: String): Path? {
         val trimmed = raw.trim()
-        // Панель на сервере: путь — на этом же сервере, «~» — домашняя папка там
-        val remote = state.currentPath.fileSystem as? org.wexclient.app.vfs.ssh.SshFileSystem
+        // Панель на сервере или телефоне: путь — там же, «~» — домашняя папка там
+        val remote = state.currentPath.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem
         if (remote != null && !trimmed.startsWith("ssh://")) {
             val expanded = when {
                 trimmed == "~" -> remote.home
@@ -431,9 +435,23 @@ fun FilePaneView(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onActivate
-            ),
+            )
+            // Рамка — в фазе рисования (поверх содержимого, как border у Surface): анимация смены панели
+            // и подсветка при перетаскивании меняют только её картинку
+            .drawWithContent {
+                drawContent()
+                val drop = paneDropHover || dropRowPath != null
+                val w = if (drop) 2.dp.toPx() else borderWidth.value.toPx()
+                val radius = 12.dp.toPx() - w / 2
+                drawRoundRect(
+                    color = if (drop) NoctaliaSecondary else borderColor.value,
+                    topLeft = androidx.compose.ui.geometry.Offset(w / 2, w / 2),
+                    size = androidx.compose.ui.geometry.Size(size.width - w, size.height - w),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(w)
+                )
+            },
         shape = RoundedCornerShape(12.dp),
-        border = if (paneDropHover || dropRowPath != null) BorderStroke(2.dp, NoctaliaSecondary) else BorderStroke(borderWidth, borderColor),
         color = MaterialTheme.colorScheme.surface
     ) {
         var paneColumnHeight by remember { mutableStateOf(0) }
@@ -999,7 +1017,7 @@ fun FilePaneView(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             if (state.isSearching) {
-                                CircularProgressIndicator(
+                                WexSpinner(
                                     modifier = Modifier.size(14.dp),
                                     strokeWidth = 2.dp,
                                     color = NoctaliaPrimary
@@ -1222,27 +1240,32 @@ fun FilePaneView(
                 if (roomy) ViewOptionsButton(state)
 
                 if (roomy && terminal != null) {
-                    // Цвет — из темы, как у соседних кнопок; открытая консоль — залитый значок с подложкой
-                    IconButton(
-                        onClick = { terminal.toggle(state.currentPath) },
-                        modifier = Modifier
-                            .size(30.dp)
-                            // Кнопка не забирает фокус: иначе после открытия он оставался на ней, а не уходил в консоль
-                            .noFocus()
-                            .background(
-                                animateColorAsState(
-                                    if (terminal.visible) NoctaliaPrimary.copy(alpha = 0.16f) else Color.Transparent,
-                                    tween(Motion.TINT),
-                                    label = "terminal-toggle"
-                                ).value,
-                                androidx.compose.foundation.shape.CircleShape
-                            )
+                    // Цвет — из темы, как у соседних кнопок; открытая консоль — залитый значок с подложкой.
+                    // Без 48 dp зоны касания Material: иначе подложка рисуется кругом шире кнопки и лезет на соседей
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        androidx.compose.material3.LocalMinimumInteractiveComponentSize provides androidx.compose.ui.unit.Dp.Unspecified
                     ) {
-                        Icon(
-                            if (terminal.visible) Icons.Default.Terminal else Icons.Outlined.OutlinedTerminal,
-                            contentDescription = if (terminal.visible) "Скрыть консоль (" + Keymap.label("app.terminal2") + ")" else "Консоль (" + Keymap.label("app.terminal2") + ")",
-                            tint = NoctaliaPrimary
-                        )
+                        IconButton(
+                            onClick = { terminal.toggle(state.currentPath) },
+                            modifier = Modifier
+                                .size(30.dp)
+                                // Кнопка не забирает фокус: иначе после открытия он оставался на ней, а не уходил в консоль
+                                .noFocus()
+                                .background(
+                                    animateColorAsState(
+                                        if (terminal.visible) NoctaliaPrimary.copy(alpha = 0.16f) else Color.Transparent,
+                                        tween(Motion.TINT),
+                                        label = "terminal-toggle"
+                                    ).value,
+                                    androidx.compose.foundation.shape.CircleShape
+                                )
+                        ) {
+                            Icon(
+                                if (terminal.visible) Icons.Default.Terminal else Icons.Outlined.OutlinedTerminal,
+                                contentDescription = if (terminal.visible) "Скрыть консоль (" + Keymap.label("app.terminal2") + ")" else "Консоль (" + Keymap.label("app.terminal2") + ")",
+                                tint = NoctaliaPrimary
+                            )
+                        }
                     }
                 }
 
@@ -1250,19 +1273,22 @@ fun FilePaneView(
                     onClick = { state.refresh() },
                     modifier = Modifier.size(30.dp).noFocus()
                 ) {
-                    // Пока папка читается, значок крутится: видно, что список ещё не готов
-                    val spin = rememberInfiniteTransition(label = "refresh-spin")
-                    val angle by spin.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 360f,
-                        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
-                        label = "refresh-angle"
-                    )
+                    // Пока папка читается, значок крутится: видно, что список ещё не готов.
+                    // Анимация живёт только это время: заведённая всегда, она просила кадр за кадром
+                    // и в простое, а все окна программы рисуются в одном потоке — тормозил и редактор
+                    val angle = if (state.isLoading && ViewPreferences.animations) {
+                        rememberInfiniteTransition(label = "refresh-spin").animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+                            label = "refresh-angle"
+                        )
+                    } else null
                     Icon(
                         Icons.Default.Refresh,
                         contentDescription = if (state.isLoading) "Читаем папку" else "Обновить",
                         tint = NoctaliaPrimary,
-                        modifier = Modifier.graphicsLayer { rotationZ = if (state.isLoading && ViewPreferences.animations) angle else 0f }
+                        modifier = Modifier.graphicsLayer { rotationZ = angle?.value ?: 0f }
                     )
                 }
             }
@@ -1379,7 +1405,7 @@ fun FilePaneView(
                         modifier = Modifier.align(Alignment.Center).padding(horizontal = 16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        CircularProgressIndicator(color = NoctaliaPrimary)
+                        WexSpinner(color = NoctaliaPrimary)
                         state.loadingText?.let {
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
@@ -1448,13 +1474,18 @@ fun FilePaneView(
                                 .collect { if (it > 2) state.pageRows = it - 1 }
                         }
 
-                        // Smoothly bring focused item into view
-                        LaunchedEffect(state.focusedIndex) {
-                            if (live && state.focusedIndex in state.entries.indices) {
-                                val target = if (state.canGoUp) state.focusedIndex + 1 else state.focusedIndex
-                                val visible = listState.layoutInfo.visibleItemsInfo
-                                if (visible.isNotEmpty() && visible.none { it.index == target }) {
-                                    listState.animateScrollToItem((target - 2).coerceAtLeast(0))
+                        // Курсор ушёл за край — плавно показать. Индекс читается потоком, а не ключом эффекта:
+                        // ключ читался в композиции, и каждая стрелка перекомпоновывала всю страницу списка
+                        // state в ключе: при смене вкладки с тем же navigationId AnimatedContent оставляет эту
+                        // страницу, и эффект иначе продолжал бы следить за прежней вкладкой
+                        LaunchedEffect(state, listState, live) {
+                            androidx.compose.runtime.snapshotFlow { state.focusedIndex }.collectLatest { focused ->
+                                if (live && focused in state.entries.indices) {
+                                    val target = if (state.canGoUp) focused + 1 else focused
+                                    val visible = listState.layoutInfo.visibleItemsInfo
+                                    if (visible.isNotEmpty() && visible.none { it.index == target }) {
+                                        listState.animateScrollToItem((target - 2).coerceAtLeast(0))
+                                    }
                                 }
                             }
                         }
@@ -1534,17 +1565,32 @@ fun FilePaneView(
                                 }
 
                                 itemsIndexed(shownEntries, key = { _, it -> it.path.toString() }) { idx, entry ->
-                                    val isRecentlyReturned = entry.name == state.recentlyReturnedChildName || state.isArrived(entry)
-                                    val subtitle = if (state.isRecursiveSearch && state.searchQuery.isNotBlank()) {
-                                        try {
-                                            state.currentPath.relativize(entry.path.parent ?: entry.path).toString().takeIf { it.isNotEmpty() && it != "." }
-                                        } catch (_: Exception) {
-                                            entry.path.parent?.toString()
+                                    // Всё, что меняется у одной-двух строк (выделение, подсветка, цель перетаскивания,
+                                    // размер папки), — через derivedStateOf: иначе каждое такое изменение
+                                    // перекомпоновывало все видимые строки (при зажатом Insert — 30 раз в секунду)
+                                    // state в ключах: вкладки с той же папкой и тем же navigationId переиспользуют строки
+                                    val isRecentlyReturned by remember(state, entry.path) {
+                                        androidx.compose.runtime.derivedStateOf { entry.name == state.recentlyReturnedChildName || state.isArrived(entry) }
+                                    }
+                                    val subtitle by remember(state, entry.path) {
+                                        androidx.compose.runtime.derivedStateOf {
+                                            if (state.isRecursiveSearch && state.searchQuery.isNotBlank()) {
+                                                try {
+                                                    state.currentPath.relativize(entry.path.parent ?: entry.path).toString().takeIf { it.isNotEmpty() && it != "." }
+                                                } catch (_: Exception) {
+                                                    entry.path.parent?.toString()
+                                                }
+                                            } else null
                                         }
-                                    } else null
+                                    }
+                                    val selectedHere by remember(state, entry.path) { androidx.compose.runtime.derivedStateOf { state.isSelected(entry) } }
+                                    val dropHere by remember(entry.path) { androidx.compose.runtime.derivedStateOf { dropRowPath == entry.path } }
+                                    val folderSizeHere by remember(state, entry.path) {
+                                        androidx.compose.runtime.derivedStateOf { if (entry.isDirectory) state.folderSizes[entry.path.toString()] else null }
+                                    }
 
                                     // Стрелки перерисовывают только две строки, а не весь экран
-                                    val focusedHere by remember(idx, live) { androidx.compose.runtime.derivedStateOf { live && idx == state.focusedIndex } }
+                                    val focusedHere by remember(state, idx, live) { androidx.compose.runtime.derivedStateOf { live && idx == state.focusedIndex } }
                                     val dragSource = rememberFileDragSource(
                                         paths = {
                                             val group = if (state.isSelected(entry)) state.selectedEntries.toList() else listOf(entry)
@@ -1569,10 +1615,10 @@ fun FilePaneView(
                                         otherPaneOnRight = otherPaneOnRight,
                                         // Плавное появление и переезд строк: удаление и вставка больше не «прыгают»
                                         dragModifier = dragSource.then(rowDrop).then(Modifier.animateItem()),
-                                        folderSize = if (entry.isDirectory) state.folderSizes[entry.path.toString()] else null,
-                                        isDropTarget = dropRowPath == entry.path,
+                                        folderSize = folderSizeHere,
+                                        isDropTarget = dropHere,
                                         entry = entry,
-                                        isSelected = state.isSelected(entry),
+                                        isSelected = selectedHere,
                                         isFocused = isActive && focusedHere,
                                         isRecentlyReturned = isRecentlyReturned,
                                         subtitle = subtitle,
@@ -1961,7 +2007,7 @@ fun FilePaneView(
                     if (state.searchQuery.isNotBlank()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (state.isSearching) {
-                                CircularProgressIndicator(
+                                WexSpinner(
                                     modifier = Modifier.size(10.dp),
                                     strokeWidth = 1.5.dp,
                                     color = NoctaliaPrimary

@@ -96,8 +96,11 @@ data class VfsEntry(
 ) {
     private val isSpecial: Boolean get() = itemType == VfsItemType.SPECIAL
 
-    // Считается один раз: строки списка спрашивают это при каждой перерисовке
-    private val lowerExt: String by lazy(LazyThreadSafetyMode.PUBLICATION) { extension.lowercase() }
+    // Считается один раз: строки списка спрашивают это при каждой перерисовке. Не `by lazy`: он — два
+    // объекта (Lazy и лямбда) на запись, а записей в кэше папок — до ста тысяч. Гонка безвредна:
+    // в худшем случае одна и та же строка посчитается дважды
+    private var lowerExtCache: String? = null
+    private val lowerExt: String get() = lowerExtCache ?: extension.lowercase().also { lowerExtCache = it }
 
     val isImage: Boolean
         get() = !isDirectory && !isSpecial && (itemType == VfsItemType.IMAGE || lowerExt in IMAGE_EXT)
@@ -130,8 +133,9 @@ data class VfsEntry(
             }
         }
 
-    val formattedSize: String by lazy(LazyThreadSafetyMode.PUBLICATION) {
-        when {
+    private var formattedSizeCache: String? = null
+    val formattedSize: String
+        get() = formattedSizeCache ?: when {
             isDirectory -> "<DIR>"
             size < 1024 -> "$size B"
             else -> {
@@ -139,12 +143,13 @@ data class VfsEntry(
                 val pre = "KMGTPE"[exp - 1]
                 String.format("%.1f %sB", size / Math.pow(1024.0, exp.toDouble()), pre)
             }
-        }
-    }
+        }.also { formattedSizeCache = it }
 
-    val formattedDate: String by lazy(LazyThreadSafetyMode.PUBLICATION) {
-        if (lastModified <= 0) "-" else DATE_FORMAT.format(java.time.Instant.ofEpochMilli(lastModified))
-    }
+    private var formattedDateCache: String? = null
+    val formattedDate: String
+        get() = formattedDateCache
+            ?: (if (lastModified <= 0) "-" else DATE_FORMAT.format(java.time.Instant.ofEpochMilli(lastModified)))
+                .also { formattedDateCache = it }
 
     companion object {
         /** Запись о файле по пути: тип, размер и дата читаются с диска (битая ссылка — без них). */
@@ -314,23 +319,31 @@ data class VfsEntry(
             }
         }
 
+        // Обе зовутся из сравнения при сортировке (2·n·log n раз) — без lowercase() и подстрок на каждый вызов
         fun getApkItemPriority(name: String, isDirectory: Boolean, isArchive: Boolean): Int {
             if (isDirectory || isArchive) return 0
-            val lower = name.lowercase()
             return when {
-                lower == "androidmanifest.xml" -> 1
-                lower.endsWith(".dex") -> 2
-                lower == "resources.arsc" -> 3
+                name.equals("androidmanifest.xml", ignoreCase = true) -> 1
+                name.endsWith(".dex", ignoreCase = true) -> 2
+                name.equals("resources.arsc", ignoreCase = true) -> 3
                 else -> 4
             }
         }
 
+        /** classes.dex — 1, classesN.dex — N, прочие .dex (и нечисловые) — 999, не .dex — Int.MAX_VALUE. */
         fun getDexNaturalIndex(name: String): Int {
-            val lower = name.lowercase()
-            if (!lower.endsWith(".dex")) return Int.MAX_VALUE
-            if (lower == "classes.dex") return 1
-            val numStr = lower.removePrefix("classes").removeSuffix(".dex")
-            return numStr.toIntOrNull() ?: 999
+            if (!name.endsWith(".dex", ignoreCase = true)) return Int.MAX_VALUE
+            if (name.equals("classes.dex", ignoreCase = true)) return 1
+            val from = if (name.startsWith("classes", ignoreCase = true)) 7 else 0
+            val to = name.length - 4
+            if (to <= from || to - from > 9) return 999
+            var n = 0
+            for (i in from until to) {
+                val c = name[i]
+                if (c !in '0'..'9') return 999
+                n = n * 10 + (c - '0')
+            }
+            return n
         }
     }
 

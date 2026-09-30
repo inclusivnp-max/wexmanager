@@ -72,7 +72,9 @@ import org.wexclient.app.history.NavHistoryItem
 import org.wexclient.app.history.NavigationHistoryManager
 import org.wexclient.app.audio.AudioPlayerManager
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -214,6 +216,10 @@ fun DualPaneScreen(
 
     var isLeftActive by remember { mutableStateOf(true) }
     var splitRatio by remember { mutableStateOf(0.5f) }
+    // Язычок на границе панелей: положение берётся при размещении, без перекомпоновки экрана
+    val splitTabAlignment = remember {
+        Alignment { size, space, dir -> BiasAlignment((splitRatio - 0.5f) * 2f, 1.0f).align(size, space, dir) }
+    }
 
     val activeState = if (isLeftActive) leftPaneState else rightPaneState
     val inactiveState = if (isLeftActive) rightPaneState else leftPaneState
@@ -278,6 +284,10 @@ fun DualPaneScreen(
     val undoLock = remember { kotlinx.coroutines.sync.Mutex() }
     // Ctrl+Z: последние действия с файлами
     val undoStack = remember { FileUndoStack() }
+    // Окно закрыли — отменять в нём больше нечего, а копии заменённого в архивах лежали бы в ~/.cache до выхода
+    androidx.compose.runtime.DisposableEffect(undoStack) {
+        onDispose { undoStack.clear() }
+    }
     var showTrash by remember { mutableStateOf(false) }
     var showShortcuts by remember { mutableStateOf(false) }
     var showContentSearch by remember { mutableStateOf(false) }
@@ -324,6 +334,9 @@ fun DualPaneScreen(
     // PDF и число страниц в нём: pdfinfo спрашивается в фоне до показа окна
     var pdfRange by remember { mutableStateOf<Pair<VfsEntry, Int>?>(null) }
     var sshConnect by remember { mutableStateOf(false) }
+    var adbConnect by remember { mutableStateOf(false) }
+    // Окно приложений телефона: серийный номер и имя телефона
+    var adbApps by remember { mutableStateOf<Pair<String, String>?>(null) }
     var diskUsageRoot by remember { mutableStateOf<java.nio.file.Path?>(null) }
     var duplicateRoots by remember { mutableStateOf<List<java.nio.file.Path>?>(null) }
     // APK → проект (jadx): что выгружаем, идущая работа и видно ли её окно
@@ -708,8 +721,9 @@ fun DualPaneScreen(
         if (entries.isEmpty() || trashing) return
         pendingDeleteCautious = false
         if (entries.any { !Trash.supports(it.path) }) {
-            pendingDeleteNote = if (entries.any { it.path.fileSystem is org.wexclient.app.vfs.ssh.SshFileSystem }) {
-                "На сервере корзины нет — удаление сразу и насовсем."
+            val remote = entries.firstNotNullOfOrNull { it.path.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem }
+            pendingDeleteNote = if (remote != null) {
+                "${remote.whereText} корзины нет — удаление сразу и насовсем."
             } else {
                 "Внутри архива корзины нет — удаление сразу и насовсем."
             }
@@ -951,16 +965,41 @@ fun DualPaneScreen(
     }
 
     /**
-     * Отключиться от сервера: панели, открытые на нём, возвращаются в домашнюю папку.
+     * Отключиться от сервера или телефона: панели, открытые там, возвращаются в домашнюю папку.
      * Закрытие ждёт ssh до нескольких секунд — не в потоке окна.
      */
-    fun disconnect(fs: org.wexclient.app.vfs.ssh.SshFileSystem) {
+    fun disconnect(fs: org.wexclient.app.vfs.remote.RemoteFileSystem) {
         val home = java.nio.file.Path.of(System.getProperty("user.home"))
         for (pane in listOf(leftPaneState, rightPaneState)) {
             if (pane.currentPath.fileSystem === fs) pane.navigateTo(home)
         }
         ioScope.launch(Dispatchers.IO) { runCatching { fs.close() } }
-        toast.info("Отключено от ${fs.target.label}")
+        toast.info("Отключено от ${fs.label}")
+    }
+
+    /** Куда сохранять APK с телефона: папка соседней панели, если она на диске, иначе этой, иначе «Загрузки». */
+    fun apkSaveDir(): java.nio.file.Path {
+        listOf(inactiveState, activeState).map { it.currentPath }
+            .firstOrNull { it.fileSystem === java.nio.file.FileSystems.getDefault() }
+            ?.let { return it }
+        val downloads = org.wexclient.app.vfs.BookmarksManager.xdgDir("DOWNLOAD")?.let { java.nio.file.Path.of(it) }
+        return downloads?.takeIf { java.nio.file.Files.isDirectory(it) } ?: java.nio.file.Path.of(System.getProperty("user.home"))
+    }
+
+    /** Папка на телефоне — в активной панели; телефон открывается, если ещё не открыт. */
+    fun openOnPhone(serial: String, name: String, dir: String) {
+        ioScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val fs = org.wexclient.app.vfs.adb.AdbFileSystemProvider.instance.open(serial, name)
+                    fs.getPath(dir).takeIf { java.nio.file.Files.isDirectory(it) }
+                }
+            }
+            result.onSuccess { path ->
+                if (path != null) activeState.navigateTo(path) else toast.info("На телефоне нет папки $dir")
+            }
+            result.onFailure { toast.error(it.message ?: it.javaClass.simpleName) }
+        }
     }
 
     /** Пункты меню файла, общие для обеих панелей. */
@@ -1067,12 +1106,17 @@ fun DualPaneScreen(
                 })
             }
         }
-        // Сервер по SSH: подключиться, а если панель уже на сервере — отключиться
-        val remote = pane.currentPath.fileSystem as? org.wexclient.app.vfs.ssh.SshFileSystem
+        // Сервер по SSH и телефон по adb: подключиться, а если панель уже там — отключиться
+        val remote = pane.currentPath.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem
+        val phone = remote as? org.wexclient.app.vfs.adb.AdbFileSystem
+        if (phone != null) {
+            add(RowAction(Icons.Default.Apps, "Приложения на телефоне…", tint = NoctaliaPrimary) { adbApps = phone.serial to phone.deviceName })
+        }
         if (remote != null) {
-            add(RowAction(Icons.Default.Dns, "Отключиться от ${remote.target.label}", tint = NoctaliaPrimary) { disconnect(remote) })
+            add(RowAction(if (phone != null) Icons.Default.PhoneAndroid else Icons.Default.Dns, "Отключиться от ${remote.label}", tint = NoctaliaPrimary) { disconnect(remote) })
         } else {
             add(RowAction(Icons.Default.Dns, "Подключиться к серверу…", "Ctrl+Shift+K", NoctaliaPrimary) { sshConnect = true })
+            add(RowAction(Icons.Default.PhoneAndroid, "Телефон по adb…", "Ctrl+Shift+M", NoctaliaPrimary) { adbConnect = true })
         }
         undoStack.peek()?.let { op ->
             add(RowAction(Icons.AutoMirrored.Filled.Undo, "Отменить ${op.title}", "Ctrl+Z", NoctaliaSecondary) { undoLast() })
@@ -1260,12 +1304,12 @@ fun DualPaneScreen(
     }
 
     /**
-     * Копия файла с сервера для просмотра: ~/.cache/wexdesktop/remote/<сервер>/<путь>.
-     * Имя сохраняется — по нему выбирается просмотрщик. Правки в копии на сервер не уходят.
+     * Копия файла с сервера или телефона для просмотра: ~/.cache/wexdesktop/remote/<откуда>/<путь>.
+     * Имя сохраняется — по нему выбирается просмотрщик. Правки в копии обратно не уходят.
      */
     fun downloadForViewing(entry: VfsEntry, token: OpeningFile): VfsEntry {
-        val remote = entry.path.fileSystem as org.wexclient.app.vfs.ssh.SshFileSystem
-        val base = java.nio.file.Path.of(System.getProperty("user.home"), ".cache/wexdesktop/remote", remote.target.label)
+        val remote = entry.path.fileSystem as org.wexclient.app.vfs.remote.RemoteFileSystem
+        val base = java.nio.file.Path.of(System.getProperty("user.home"), ".cache/wexdesktop/remote", remote.cacheKey)
         val target = base.resolve(entry.path.toAbsolutePath().toString().removePrefix("/"))
         java.nio.file.Files.createDirectories(target.parent)
         val total = entry.size.coerceAtLeast(1)
@@ -1324,10 +1368,10 @@ fun DualPaneScreen(
     }
 
     fun prepareOpen(entry: VfsEntry, token: OpeningFile): () -> Unit {
-        // Файл на сервере. Текст и код правятся прямо там: читаются и пишутся через ssh.
+        // Файл на сервере или телефоне. Текст и код правятся прямо там: читаются и пишутся через ssh или adb.
         // Всё остальное — PDF, видео, архивы, документы — открываем из скачанной копии:
-        // внешние программы получили бы серверный путь и открыли бы локальный файл с тем же именем
-        if (entry.path.fileSystem is org.wexclient.app.vfs.ssh.SshFileSystem) {
+        // внешние программы получили бы чужой путь и открыли бы локальный файл с тем же именем
+        if (entry.path.fileSystem is org.wexclient.app.vfs.remote.RemoteFileSystem) {
             val editable = entry.itemType == VfsItemType.REGULAR_FILE || TypeFilter.CODE.accepts(entry)
             if (!editable) {
                 val local = downloadForViewing(entry, token)
@@ -1608,11 +1652,13 @@ fun DualPaneScreen(
         onDispose { }
     }
 
-    // Закрытие окна закрывает консоли всех вкладок, а не только видимых
+    // Закрытие окна закрывает вкладки целиком, а не только консоли: иначе каждая оставалась в памяти —
+    // слушатель в VfsManager и слежение за папкой (inotify) держали её вместе со списком файлов и историей,
+    // и закрытая вкладка продолжала перечитывать свою папку при каждом изменении
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
-            leftTabs.tabs.forEach { it.disposeTerminal() }
-            rightTabs.tabs.forEach { it.disposeTerminal() }
+            leftTabs.tabs.forEach { it.dispose() }
+            rightTabs.tabs.forEach { it.dispose() }
         }
     }
 
@@ -1754,6 +1800,7 @@ fun DualPaneScreen(
                         return@onPreviewKeyEvent true
                     }
                     "app.ssh" -> { sshConnect = true; return@onPreviewKeyEvent true }
+                    "app.adb" -> { adbConnect = true; return@onPreviewKeyEvent true }
                     "app.diskusage" -> {
                         val dir = activeState.currentPath
                         if (dir.fileSystem == java.nio.file.FileSystems.getDefault()) diskUsageRoot = dir
@@ -2100,7 +2147,10 @@ fun DualPaneScreen(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-        Row(
+        // Доля панелей читается при раскладке, а не в композиции: перетаскивание разделителя
+        // раньше перекомпоновывало весь экран на каждое движение мыши
+        SplitPanes(
+            ratio = { splitRatio },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 0.dp)
@@ -2108,7 +2158,6 @@ fun DualPaneScreen(
             // Left Pane (Niri style: focus follows mouse)
             Box(
                 modifier = Modifier
-                    .weight(splitRatio)
                     .fillMaxHeight()
                     .padding(bottom = 8.dp)
                     .activateOnMouseMove { if (!isLeftActive) isLeftActive = true }
@@ -2206,7 +2255,6 @@ fun DualPaneScreen(
             // Right Pane (Niri style: focus follows mouse)
             Box(
                 modifier = Modifier
-                    .weight(1f - splitRatio)
                     .fillMaxHeight()
                     .padding(bottom = 8.dp)
                     .activateOnMouseMove { if (isLeftActive) isLeftActive = false }
@@ -2294,7 +2342,7 @@ fun DualPaneScreen(
             modifier = Modifier
                 .width(56.dp)
                 .height(20.dp)
-                .align(BiasAlignment((splitRatio - 0.5f) * 2f, 1.0f))
+                .align(splitTabAlignment)
                 .pointerHoverIcon(PointerIcon.Hand)
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
@@ -2376,7 +2424,7 @@ fun DualPaneScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${AudioPlayerManager.formatTime(AudioPlayerManager.currentPositionMs)} / ${AudioPlayerManager.formatTime(AudioPlayerManager.totalDurationMs)}",
+                            text = "${AudioPlayerManager.formatTime(AudioPlayerManager.positionSeconds * 1000)} / ${AudioPlayerManager.formatTime(AudioPlayerManager.totalDurationMs)}",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp,
@@ -2439,7 +2487,7 @@ fun DualPaneScreen(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CircularProgressIndicator(
+                        WexSpinner(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
                             color = NoctaliaPrimary
@@ -2475,7 +2523,7 @@ fun DualPaneScreen(
                         if (f != null) {
                             CircularProgressIndicator(progress = { f }, modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                         } else {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
+                            WexSpinner(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
@@ -3257,6 +3305,35 @@ fun DualPaneScreen(
         )
     }
 
+    if (adbConnect) {
+        AdbDevicesDialog(
+            onOpenFiles = { home ->
+                adbConnect = false
+                activeState.navigateTo(home)
+            },
+            onOpenApps = { device ->
+                adbConnect = false
+                adbApps = device.serial to device.displayName
+            },
+            onDismiss = { adbConnect = false }
+        )
+    }
+
+    adbApps?.let { (serial, name) ->
+        AdbAppsDialog(
+            serial = serial,
+            deviceName = name,
+            saveDir = apkSaveDir(),
+            onSaved = { saved ->
+                activeState.refresh()
+                inactiveState.refresh()
+                saved.parent?.let { revealArrived(it, listOf(saved.fileName.toString())) }
+            },
+            onOpenDataFolder = { dir -> openOnPhone(serial, name, dir) },
+            onDismiss = { adbApps = null }
+        )
+    }
+
     pdfRange?.let { (entry, pages) ->
         InputDialog(
             title = "Извлечь страницы",
@@ -3735,7 +3812,7 @@ fun DualPaneScreen(
                             val entry = uf
                             unknownFileEntry = null
                             try {
-                                ProcessBuilder("xdg-open", entry.path.toAbsolutePath().toString()).withUserEnv().start()
+                                ProcessBuilder(org.wexclient.app.util.systemOpenCommand(entry.path.toAbsolutePath().toString())).withUserEnv().start()
                             } catch (e: Exception) {
                                 infoMessage = "Не удалось открыть: ${e.message ?: e.javaClass.simpleName}"
                             }
@@ -3946,3 +4023,25 @@ private data class PanePlaces(
     val rightPath: java.nio.file.Path,
     val rightFile: String?
 )
+
+/**
+ * Две панели и разделитель между ними: ширины делятся по [ratio] при раскладке (как веса Row),
+ * поэтому смена доли — только новая раскладка, без перекомпоновки. Порядок детей: левая, разделитель, правая.
+ */
+@Composable
+private fun SplitPanes(ratio: () -> Float, modifier: Modifier, content: @Composable () -> Unit) {
+    androidx.compose.ui.layout.Layout(content = content, modifier = modifier) { measurables, constraints ->
+        val w = constraints.maxWidth
+        val h = constraints.maxHeight
+        val divider = measurables[1].measure(androidx.compose.ui.unit.Constraints(maxWidth = w, minHeight = h, maxHeight = h))
+        val free = (w - divider.width).coerceAtLeast(0)
+        val leftW = (free * ratio().coerceIn(0f, 1f)).toInt()
+        val left = measurables[0].measure(androidx.compose.ui.unit.Constraints.fixed(leftW, h))
+        val right = measurables[2].measure(androidx.compose.ui.unit.Constraints.fixed(free - leftW, h))
+        layout(w, h) {
+            left.place(0, 0)
+            divider.place(leftW, 0)
+            right.place(leftW + divider.width, 0)
+        }
+    }
+}

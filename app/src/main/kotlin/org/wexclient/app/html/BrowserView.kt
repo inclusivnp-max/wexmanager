@@ -26,6 +26,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -48,6 +49,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.wexclient.app.theme.NoctaliaPrimary
@@ -64,7 +66,8 @@ fun BrowserView(
     reloadKey: Int = 0,
     onStatus: (String) -> Unit = {}
 ) {
-    var frame by remember { mutableStateOf<ImageBitmap?>(null) }
+    // По адресу: сменился адрес — прежний кадр уходит с экрана в той же композиции, где его закрывает FrameHandoff
+    var frame by remember(url) { mutableStateOf<ImageBitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var ready by remember { mutableStateOf(false) }
     var session by remember { mutableStateOf<BrowserSession?>(null) }
@@ -75,6 +78,12 @@ fun BrowserView(
         val cssWidth = maxWidth.value.toInt().coerceAtLeast(320)
         val cssHeight = maxHeight.value.toInt().coerceAtLeast(240)
 
+        // Здесь же, где рисуется кадр: закрытие кадров и смена картинки попадают в одну композицию
+        val handoff = remember(url) { FrameHandoff() }
+        DisposableEffect(handoff) {
+            onDispose { handoff.releaseAll() }
+        }
+
         LaunchedEffect(url) {
             frame = null
             error = null
@@ -83,9 +92,12 @@ fun BrowserView(
             // Кадры разбираются в фоне: раскодировать JPEG в потоке окна — это заметные рывки
             val decoder = launch(Dispatchers.Default) {
                 for (bytes in frames) {
+                    // Окно не успевает показывать (свёрнуто, подвисло) — ждём, а не копим картинки:
+                    // канал хранит только последний кадр, он и покажется
+                    while (handoff.pending >= 2) delay(16)
                     val bitmap = BrowserSession.decodeFrame(bytes)
                     if (bitmap != null) {
-                        frame = bitmap
+                        handoff.publish(bitmap) { frame = it }
                         ready = true
                     }
                 }
@@ -147,6 +159,11 @@ fun BrowserView(
         }
 
         val current = frame
+        // Композиция с этим кадром применена — Image рисует уже его, прежние можно закрывать
+        DisposableEffect(handoff, current) {
+            current?.let(handoff::shown)
+            onDispose { }
+        }
         if (current != null) {
             Image(
                 bitmap = current,
@@ -211,7 +228,7 @@ fun BrowserView(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                CircularProgressIndicator(color = NoctaliaPrimary, modifier = Modifier.size(28.dp))
+                org.wexclient.app.ui.WexSpinner(color = NoctaliaPrimary, modifier = Modifier.size(28.dp))
                 Text(
                     text = "Запуск браузера…",
                     style = MaterialTheme.typography.labelSmall,
@@ -219,6 +236,65 @@ fun BrowserView(
                     modifier = Modifier.padding(top = 8.dp)
                 )
             }
+        }
+    }
+}
+
+/**
+ * Кадры потока (страница, видео) из фонового потока в окно. Сборщик мусора не видит нативную память
+ * картинок: при 30–60 кадрах в секунду между сборками копились сотни мегабайт, поэтому кадры закрываем сами.
+ * Закрывает их не поток, а окно ([shown]): сменённый в состоянии кадр рисуется до следующей композиции,
+ * и закрыть его раньше — значит нарисовать закрытую картинку.
+ */
+internal class FrameHandoff {
+    private val frames = ArrayDeque<ImageBitmap>()
+    private var headShown = false
+    private var released = false
+
+    /** Сколько кадров ещё не дошло до экрана: окно не успевает — новые не копим. */
+    val pending: Int
+        get() = synchronized(this) { frames.size - if (headShown) 1 else 0 }
+
+    /**
+     * Кадр в очередь и в состояние ([show]) одним шагом: порядок очереди совпадает с порядком записей,
+     * поэтому кадр старше показанного в состояние уже не вернётся. Все картинки состояния — только через сюда.
+     */
+    fun publish(frame: ImageBitmap, show: (ImageBitmap) -> Unit) {
+        synchronized(this) {
+            if (!released) {
+                frames.addLast(frame)
+                show(frame)
+                return
+            }
+        }
+        // Окно уже закрыто — кадр никто не покажет
+        close(frame)
+    }
+
+    /** Композиция с [frame] применена: всё, что опубликовано раньше, уже не рисуется. Только из потока окна. */
+    fun shown(frame: ImageBitmap) {
+        val old = synchronized(this) {
+            val index = frames.indexOfFirst { it === frame }
+            if (index < 0) return
+            headShown = true
+            List(index) { frames.removeFirst() }
+        }
+        old.forEach(::close)
+    }
+
+    /** Картинки больше не рисуются (окно закрыто, сменился источник): закрываем все, запоздавшие — по приходу. */
+    fun releaseAll() {
+        val all = synchronized(this) {
+            released = true
+            frames.toList().also { frames.clear() }
+        }
+        all.forEach(::close)
+    }
+
+    companion object {
+        /** Кадр, который так и не попал в состояние, закрывается сразу. */
+        fun close(frame: ImageBitmap) {
+            runCatching { frame.asSkiaBitmap().close() }
         }
     }
 }

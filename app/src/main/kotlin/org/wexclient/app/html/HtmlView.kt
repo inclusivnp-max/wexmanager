@@ -20,8 +20,8 @@ fun HtmlView(
     onOpenFile: ((Path) -> Unit)? = null
 ) {
     // Разбор не должен ронять окно: в худшем случае показываем исходный текст
-    val blocks = remember(text) {
-        runCatching { HtmlBlocks.render(text) }.getOrElse { listOf(MdBlock.Code("html", text)) }
+    val blocks = org.wexclient.app.markdown.parsedInBackground(text) {
+        runCatching { HtmlBlocks.render(it) }.getOrElse { _ -> listOf(MdBlock.Code("html", it)) }
     }
     MarkdownBlocksView(blocks = blocks, baseDir = baseDir, modifier = modifier, onOpenFile = onOpenFile)
 }

@@ -52,10 +52,36 @@ class FileUndoStack(private val limit: Int = 50) {
 
     val size: Int get() = ops.size
 
-    @Synchronized
     fun push(op: FileOp) {
-        ops.addLast(op)
-        while (ops.size > limit) ops.removeFirst()
+        val dropped = synchronized(this) {
+            ops.addLast(op)
+            val out = ArrayList<FileOp>()
+            while (ops.size > limit) out.add(ops.removeFirst())
+            out
+        }
+        discardBackups(dropped)
+    }
+
+    /** Забыть всё (окно закрыто): копии заменённого в архивах больше не понадобятся. */
+    fun clear() {
+        val dropped = synchronized(this) { ops.toList().also { ops.clear() } }
+        discardBackups(dropped)
+    }
+
+    // Отменить вытесненное уже нельзя, а его копии из архивов лежали бы в ~/.cache до выхода.
+    // Не в потоке окна: копия бывает целой папкой
+    private fun discardBackups(dropped: List<FileOp>) {
+        val backups = dropped.flatMap { op ->
+            when (op) {
+                is FileOp.Moved -> op.archiveReplaced
+                is FileOp.Copied -> op.archiveReplaced
+                else -> emptyList()
+            }
+        }
+        if (backups.isEmpty()) return
+        kotlin.concurrent.thread(isDaemon = true, name = "wex-undo-discard") {
+            backups.forEach { runCatching { UndoBackups.discard(it) } }
+        }
     }
 
     @Synchronized

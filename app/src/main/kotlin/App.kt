@@ -84,7 +84,10 @@ fun launchWex(args: Array<String> = emptyArray()) {
     org.wexclient.app.util.ErrorLog.install()
     // Значения по умолчанию; заданные снаружи (JAVA_OPTS) не перебиваем — так можно попробовать
     // другой способ отрисовки, не пересобирая программу
-    if (System.getProperty("skiko.renderApi") == null) System.setProperty("skiko.renderApi", "OPENGL")
+    // На Windows — выбор skiko (Direct3D, затем OpenGL и программная): OpenGL там слабый в RDP и виртуалках
+    if (System.getProperty("skiko.renderApi") == null && java.io.File.separatorChar != '\\') {
+        System.setProperty("skiko.renderApi", "OPENGL")
+    }
     if (System.getProperty("compose.swing.render.on.graphics") == null) {
         System.setProperty("compose.swing.render.on.graphics", "true")
     }
@@ -130,6 +133,11 @@ fun launchWex(args: Array<String> = emptyArray()) {
         var quitting by remember { mutableStateOf(false) }
         var quitSignal by remember { mutableStateOf(0) }
         val finish = {
+            // Новые запуски — уже не сюда: пока этот процесс дописывает сохранения, путь от них потерялся бы
+            org.wexclient.app.util.SingleInstance.stop()
+            // Окна прячем сразу: дописывание начатого сохранения (до 30 с) и закрытие архивов идут
+            // уже без замёрзшего окна на экране
+            java.awt.Window.getWindows().forEach { runCatching { it.isVisible = false } }
             org.wexclient.app.history.NavigationHistoryManager.flushCurrentStateBeforeClose()
             // Размер шрифта консоли пишется с задержкой — дописываем, иначе последний зум пропадёт
             org.wexclient.app.terminal.TerminalPreferences.flush()
@@ -163,8 +171,17 @@ fun launchWex(args: Array<String> = emptyArray()) {
             }
             // Фоновый запуск: окон ещё не было — убирать нечего
             if (!hadWindows.get()) return@LaunchedEffect
+            // Сокет не открылся (старая Windows, чужие права): следующий запуск этот процесс не найдёт,
+            // и без окон он висел бы невидимым до перезагрузки — выходим как по Ctrl+Q
+            if (!org.wexclient.app.util.SingleInstance.listening) {
+                finish()
+                return@LaunchedEffect
+            }
             org.wexclient.app.history.NavigationHistoryManager.flushCurrentStateBeforeClose()
             org.wexclient.app.terminal.TerminalPreferences.flush()
+            // Результаты анализа места и поиска копий — десятки мегабайт, показывать их уже некому
+            org.wexclient.app.ui.DiskUsageSession.forget()
+            org.wexclient.app.ui.DuplicatesSession.forget()
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 runCatching { vfsManager.closeAll() }
                 org.wexclient.app.vfs.ssh.SshFileSystemProvider.instance.opened().forEach { runCatching { it.close() } }

@@ -567,5 +567,29 @@ class EditorCoreTest {
         assertTrue(c2.text.startsWith("items = items + 1"), c2.text.take(40))
         assertEquals(5000, Regex("\\bitems\\b").findAll(c2.text).count())
     }
+
+    @Test
+    fun `file changed on disk is reloaded in its charset keeping the caret line`() {
+        val cp1251 = java.nio.charset.Charset.forName("windows-1251")
+        val first = "первая\nвторая строка\r\n".toByteArray(cp1251)
+        val decoded = TextCodec.decode(first, cp1251)
+        val ctrl = CodeEditorController(decoded.text)
+        ctrl.attachFile(decoded, first, null)
+        ctrl.select(ctrl.text.indexOf("строка"))
+        ctrl.applyEdit(TextFieldValue(ctrl.text + "x", TextRange(ctrl.text.length + 1)))
+        ctrl.select(ctrl.text.indexOf("строка"))
+        assertTrue(ctrl.isDirty)
+
+        val changed = "новая\nвторая изменена\r\nтретья\r\n".toByteArray(cp1251)
+        ctrl.reloadFromDisk(changed)
+        assertEquals("новая\nвторая изменена\nтретья\n", ctrl.text)
+        assertFalse(ctrl.isDirty)
+        assertEquals(cp1251, ctrl.charset)
+        assertTrue(changed.contentEquals(ctrl.originalBytes))
+        // Каретка — на той же строке и колонке, что и до перечитывания
+        assertEquals(ctrl.snapshot.lineStart(1) + 7, ctrl.value.selection.start)
+        // Отменять нечего: история относилась к старому тексту
+        assertFalse(ctrl.undo())
+    }
 }
 

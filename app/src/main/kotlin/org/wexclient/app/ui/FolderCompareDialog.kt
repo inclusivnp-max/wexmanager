@@ -207,7 +207,7 @@ fun FolderCompareDialog(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.align(Alignment.Center)
                     ) {
-                        CircularProgressIndicator(color = NoctaliaPrimary, modifier = Modifier.size(26.dp))
+                        WexSpinner(color = NoctaliaPrimary, modifier = Modifier.size(26.dp))
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(progress, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, maxLines = 1)
                     }

@@ -269,6 +269,31 @@ class FastTextLayoutTest {
         assertEquals(6, wordStart(text, 12, isWord))
     }
 
+    @Test
+    fun `на границе строки переход по словам шагает через перевод строки`() {
+        val text = "слово\n  другое"
+        val isWord: (Char) -> Boolean = { it.isLetterOrDigit() }
+        // Ctrl+← в начале строки — в конец предыдущей (раньше каретка стояла на месте)
+        assertEquals(5, wordStart(text, 6, isWord))
+        // Ctrl+→ в конце строки — на следующую
+        assertEquals(6, wordEnd(text, 5, isWord))
+        // Из отступа — к началу строки, а не через неё
+        assertEquals(6, wordStart(text, 8, isWord))
+    }
+
+    @Test
+    fun `конец строки ровно на границе переноса остаётся на её последней экранной строке`() {
+        val snap = snapshotOf("a".repeat(20) + "\nb")
+        val layout = FastLayout(snap, tabSize = 4, whitespace = false, columns = 10)
+        assertEquals(2, layout.rowsOf(0))
+        // Каретка в конце первой строки — в конце второй экранной строки, а не в начале следующей строки текста
+        assertEquals(1 to 10, layout.rowAndColumn(20))
+        assertEquals(20, layout.offsetAt(1, 10))
+        // Середина строки на границе переноса — по-прежнему начало следующей экранной строки
+        assertEquals(1 to 0, layout.rowAndColumn(10))
+        assertEquals(2 to 0, layout.rowAndColumn(snap.lineStart(1)))
+    }
+
 
 
 }

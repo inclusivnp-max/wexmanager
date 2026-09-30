@@ -248,7 +248,13 @@ class SymbolPainter(codepoint: Int, private val typeface: Typeface?) : Painter()
     private val text = String(Character.toChars(codepoint))
     private var alpha = 1f
     private var colorFilter: ColorFilter? = null
-    private var font: Font? = null
+
+    // Один Paint на значок: новый на каждую отрисовку — нативный объект Skia, который ждал сборщика мусора
+    // (при прокрутке списка это сотни в секунду)
+    private val paint = Paint().apply {
+        color = Color.Black
+        isAntiAlias = true
+    }
 
     override val intrinsicSize: Size get() = Size.Unspecified
 
@@ -266,21 +272,30 @@ class SymbolPainter(codepoint: Int, private val typeface: Typeface?) : Painter()
         val tf = typeface ?: return
         val s = minOf(size.width, size.height)
         if (s <= 0f) return
-        val f = font?.takeIf { it.size == s } ?: Font(tf, s).apply {
-            edging = FontEdging.ANTI_ALIAS
-            isSubpixel = true
-        }.also { font = it }
-        val paint = Paint().apply {
-            color = Color.Black
-            alpha = this@SymbolPainter.alpha
-            colorFilter = this@SymbolPainter.colorFilter
-            isAntiAlias = true
-        }
+        val f = fontFor(tf, s)
+        paint.alpha = alpha
+        paint.colorFilter = colorFilter
         // Глифы Material Symbols занимают em-квадрат над базовой линией (0..960 при upm 960)
         val left = (size.width - s) / 2f
         val top = (size.height - s) / 2f
         drawIntoCanvas { canvas ->
             canvas.nativeCanvas.drawString(text, left, top + s, f, paint.asFrameworkPaint())
+        }
+    }
+
+    private companion object {
+        /** Шрифт на (начертание, размер) — общий для всех значков: размеров в интерфейсе с десяток. */
+        private val fonts = object : LinkedHashMap<Pair<Typeface, Float>, Font>(32, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Typeface, Float>, Font>?) = size > 64
+        }
+
+        fun fontFor(tf: Typeface, size: Float): Font = synchronized(fonts) {
+            fonts.getOrPut(tf to size) {
+                Font(tf, size).apply {
+                    edging = FontEdging.ANTI_ALIAS
+                    isSubpixel = true
+                }
+            }
         }
     }
 }

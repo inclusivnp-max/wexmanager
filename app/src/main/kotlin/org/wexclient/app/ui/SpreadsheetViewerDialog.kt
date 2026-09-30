@@ -242,7 +242,7 @@ fun SpreadsheetViewerDialog(entry: VfsEntry, onDismiss: () -> Unit) {
     ) {
         when {
             result == null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = NoctaliaPrimary)
+                WexSpinner(color = NoctaliaPrimary)
             }
             doc == null -> GrailEmptyState(
                 "Не удалось прочитать книгу: " + (result.exceptionOrNull()?.message ?: "неизвестная ошибка")

@@ -11,7 +11,8 @@ package org.wexclient.app.util
  */
 object ChildEnv {
     private const val SAVED = "WEX_ORIG_"
-    private val launcherVars = listOf("JAVA_HOME", "JAVA_OPTS", "_JAVA_AWT_WM_NONREPARENTING")
+    // MALLOC_ARENA_MAX и __GL_YIELD ставит bin/app (nativeEnv в build.gradle.kts) — тоже только ради WEX
+    private val launcherVars = listOf("JAVA_HOME", "JAVA_OPTS", "_JAVA_AWT_WM_NONREPARENTING", "MALLOC_ARENA_MAX", "__GL_YIELD")
 
     fun userEnv(parent: Map<String, String> = System.getenv()): MutableMap<String, String> =
         HashMap(parent).also(::restore)

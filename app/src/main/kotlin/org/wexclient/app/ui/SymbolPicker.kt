@@ -138,7 +138,7 @@ fun SymbolPicker(
         ) {
             if (!loaded) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    CircularProgressIndicator(color = NoctaliaPrimary, modifier = Modifier.size(28.dp))
+                    WexSpinner(color = NoctaliaPrimary, modifier = Modifier.size(28.dp))
                 }
             } else if (results.isEmpty()) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {

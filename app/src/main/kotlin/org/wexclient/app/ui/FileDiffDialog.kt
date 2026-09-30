@@ -309,7 +309,7 @@ fun FileDiffDialog(
                     // Diff Lines List
                     if (isLoading) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                            WexSpinner(color = MaterialTheme.colorScheme.primary)
                         }
                     } else if (diffError != null) {
                         Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {

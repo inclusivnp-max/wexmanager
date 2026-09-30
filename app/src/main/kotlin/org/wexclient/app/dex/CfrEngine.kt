@@ -6,7 +6,7 @@ import org.benf.cfr.reader.api.SinkReturns
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Альтернативный Java-движок: DEX -> .class через dex2jar -> Java через CFR.
+ * Альтернативный Java-движок: DEX -> .class (d2c, запасной — dex2jar, [DexJarCache]) -> Java через CFR.
  *
  * CFR (https://www.benf.org/other/cfr) часто чище восстанавливает сложные конструкции
  * (строковые конкатенации, switch по строкам, try/catch), где JADX сыпет ошибками.
@@ -29,39 +29,35 @@ class CfrEngine(
     fun decompileToJava(fullName: String): String {
         javaByClass[fullName]?.let { return it }
         return try {
-            // 1. Транслированные jar'ы (один раз на всех, дальше из кэша)
-            val jars = cache.getJars()
-
-            // 2. Байты нужного класса
+            // Трансляция DEX -> jar одна на всех (дальше из кэша), CFR — только на этом классе
             val entryName = fullName.replace('.', '/') + ".class"
-            var classBytes: ByteArray? = null
-            for (jar in jars) {
-                classBytes = DexToJar.readEntry(jar, entryName)
-                if (classBytes != null) break
+            val first = decompileFrom(cache.jarsFor(entryName), entryName, fullName)
+                ?: return "// CFR: класс $fullName не найден в транслированном jar"
+            val java = DexToJar.secondOpinion(first, FAILED) {
+                cache.alternativeJarsFor(entryName)?.let { decompileFrom(it, entryName, fullName) }
             }
-            if (classBytes == null) {
-                return "// CFR: класс $fullName не найден в транслированном jar"
-            }
-
-            // 3. CFR только на этом классе
-            val singleDir = workDir.resolve("single").apply { mkdirs() }
-            val classFile = singleDir.resolve(entryName).apply {
-                parentFile.mkdirs()
-                writeBytes(classBytes)
-            }
-
-            val collected = ConcurrentHashMap<String, String>()
-            val driver = CfrDriver.Builder()
-                .withOptions(mapOf("showversion" to "false"))
-                .withOutputSink(collectingSinkInto(collected))
-                .build()
-            driver.analyse(listOf(classFile.absolutePath))
-
-            collected.forEach { (k, v) -> javaByClass[k] = v }
-            javaByClass[fullName] ?: "// CFR: класс $fullName не декомпилирован"
+            javaByClass[fullName] = java
+            java
         } catch (e: Exception) {
             "// CFR недоступен: ${e.message ?: e.javaClass.simpleName}"
         }
+    }
+
+    /** Java класса из первого jar, где он есть; null — ни в одном. */
+    private fun decompileFrom(jars: List<String>, entryName: String, fullName: String): String? {
+        val classBytes = DexToJar.readFirst(jars, entryName) ?: return null
+        val singleDir = workDir.resolve("single").apply { mkdirs() }
+        val classFile = singleDir.resolve(entryName).apply {
+            parentFile.mkdirs()
+            writeBytes(classBytes)
+        }
+        val collected = ConcurrentHashMap<String, String>()
+        val driver = CfrDriver.Builder()
+            .withOptions(mapOf("showversion" to "false"))
+            .withOutputSink(collectingSinkInto(collected))
+            .build()
+        driver.analyse(listOf(classFile.absolutePath))
+        return collected[fullName] ?: "// CFR: класс $fullName не декомпилирован"
     }
 
     fun close() {
@@ -77,6 +73,9 @@ class CfrEngine(
     }
 
     companion object {
+        /** Пометки CFR у метода, который он не собрал. */
+        private val FAILED = arrayOf("has failed to decompile")
+
         internal fun collectingSinkInto(collected: MutableMap<String, String>): OutputSinkFactory {
             return object : OutputSinkFactory {
                 override fun getSupportedSinks(

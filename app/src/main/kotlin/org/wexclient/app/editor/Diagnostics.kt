@@ -64,10 +64,15 @@ object ToolLocator {
             }
         }.apply { isDaemon = true; start() }
         val out = java.io.ByteArrayOutputStream()
+        val truncated = java.util.concurrent.atomic.AtomicBoolean(false)
         val reader = Thread {
             try {
-                // Линтер, выплюнувший гигабайт, не должен съесть память: читаем с запасом и хватит
-                p.inputStream.use { out.write(it.readNBytes(MAX_OUTPUT_BYTES)) }
+                // Линтер, выплюнувший гигабайт, не должен съесть память: читаем с запасом и хватит.
+                // Что вывод обрезан, запоминаем: форматтер иначе заменил бы документ его началом
+                p.inputStream.use {
+                    out.write(it.readNBytes(MAX_OUTPUT_BYTES))
+                    if (it.read() != -1) truncated.set(true)
+                }
             } catch (_: Exception) {
             }
         }.apply { isDaemon = true; start() }
@@ -89,7 +94,7 @@ object ToolLocator {
             output = if (text.length > maxChars) text.take(maxChars) else text,
             timedOut = !finished,
             errors = err.toString(Charsets.UTF_8),
-            complete = !reader.isAlive && text.length <= maxChars
+            complete = !reader.isAlive && !truncated.get() && text.length <= maxChars
         )
     } catch (_: Exception) {
         null
@@ -111,7 +116,7 @@ object DiagnosticsEngine {
         val lang = snap.language
         val out = ArrayList<Diagnostic>()
         when (lang.id) {
-            "json" -> {
+            "json" -> if (!fileName.lowercase().endsWith(".json5")) {
                 val lower = fileName.lowercase()
                 // Конфиги с комментариями (VS Code, tsconfig, waybar) — без предупреждений
                 val lenient = lower.endsWith(".jsonc") || lower.endsWith(".json5") || lower.startsWith("tsconfig") ||
@@ -134,7 +139,10 @@ object DiagnosticsEngine {
             when (lang.id) {
                 "smali" -> smali(snap)
                 "shell" -> if (!externalTools) emptyList() else {
-                    val zsh = fileName.endsWith(".zsh") || text.startsWith("#!/bin/zsh") || text.startsWith("#!/usr/bin/env zsh")
+                    // .zshrc и компания — zsh, а не bash: bash -n помечал бы его синтаксис ошибками
+                    val shebang = text.lineSequence().firstOrNull().orEmpty()
+                    val zsh = fileName.endsWith(".zsh") || fileName.removePrefix(".") in ZSH_FILES ||
+                        (shebang.startsWith("#!") && shebang.contains("zsh"))
                     val shell = if (zsh) ToolLocator.find("zsh") else ToolLocator.find("bash")
                     if (shell == null) emptyList()
                     else lineMessages(snap, ToolLocator.run(listOf(shell, "-n"), text), Regex("line (\\d+):\\s*(.*)"), "bash")
@@ -142,8 +150,9 @@ object DiagnosticsEngine {
                 "fish" -> ifTool(externalTools, "fish") { fish ->
                     lineMessages(snap, ToolLocator.run(listOf(fish, "--no-execute", "/dev/stdin"), text), Regex("\\(line (\\d+)\\):\\s*(.*)"), "fish")
                 }
-                // -I: без текущей папки в sys.path — чужой ast.py или yaml.py рядом не выполнится
-                "python" -> ifTool(externalTools, "python3") { py ->
+                // -I: без текущей папки в sys.path — чужой ast.py или yaml.py рядом не выполнится.
+                // Cython (.pyx, .pxd) — не Python: его синтаксис ast.parse не разберёт
+                "python" -> if (fileName.endsWith(".pyx") || fileName.endsWith(".pxd")) emptyList() else ifTool(externalTools, "python3") { py ->
                     val script = "import ast,sys\ntry:\n    ast.parse(sys.stdin.read())\nexcept SyntaxError as e:\n    print('%s:%s:%s' % (e.lineno or 1, e.offset or 1, e.msg))\n"
                     colMessages(snap, ToolLocator.run(listOf(py, "-I", "-c", script), text), Regex("^(\\d+):(\\d+):(.*)$", RegexOption.MULTILINE), "python")
                 }
@@ -155,14 +164,16 @@ object DiagnosticsEngine {
                     val script = "import sys\ntry:\n    import tomllib\nexcept ImportError:\n    sys.exit(0)\ntry:\n    tomllib.loads(sys.stdin.read())\nexcept tomllib.TOMLDecodeError as e:\n    print(e)\n"
                     colMessages(snap, ToolLocator.run(listOf(py, "-I", "-c", script), text), Regex("^(.*)\\(at line (\\d+), column (\\d+)\\)", RegexOption.MULTILINE), "toml", msgGroup = 1, lineGroup = 2, colGroup = 3)
                 }
-                "javascript" -> ifTool(externalTools, "node") { node ->
+                // JSX node --check не понимает
+                "javascript" -> if (fileName.endsWith(".jsx")) emptyList() else ifTool(externalTools, "node") { node ->
                     val module = Regex("^\\s*(import|export)\\s", RegexOption.MULTILINE).containsMatchIn(text) || fileName.endsWith(".mjs")
                     withTemp(if (module) "check.mjs" else "check.cjs", text) { f ->
                         val r = ToolLocator.run(listOf(node, "--check", f.absolutePath), null)
                         nodeMessages(snap, r, f.name)
                     }
                 }
-                "lua" -> ifTool(externalTools, "luac") { luac ->
+                // Luau с типами — не Lua 5.x
+                "lua" -> if (fileName.endsWith(".luau")) emptyList() else ifTool(externalTools, "luac") { luac ->
                     lineMessages(snap, ToolLocator.run(listOf(luac, "-p", "-"), text), Regex("stdin:(\\d+):\\s*(.*)"), "luac")
                 }
                 "go" -> ifTool(externalTools, "gofmt") { gofmt ->
@@ -317,32 +328,16 @@ object DiagnosticsEngine {
         listOf(Diagnostic(s, e, Severity.ERROR, msg, "niri validate"))
     }
 
-    private val smaliPos = Regex("\\[(\\d+),(\\d+)]\\s*(.*)")
-
     private fun smali(snap: HighlightSnapshot): List<Diagnostic> {
         if (!snap.text.contains(".class")) return emptyList()
-        val opcodes = try {
-            org.jf.dexlib2.Opcodes.forApi(30)
-        } catch (_: Exception) {
-            org.jf.dexlib2.Opcodes.getDefault()
-        }
         return try {
-            SmaliAssembler.assemble(snap.text, opcodes)
+            SmaliAssembler.assemble(snap.text)
             emptyList()
         } catch (e: SmaliSyntaxException) {
-            e.errors.take(50).map { msg ->
-                val m = smaliPos.find(msg)
-                if (m != null) {
-                    val (s, en) = lineRange(snap, m.groupValues[1].toInt(), m.groupValues[2].toInt() + 1)
-                    Diagnostic(s, en, Severity.ERROR, m.groupValues[3].trim(), "smali")
-                } else {
-                    val (s, en) = lineRange(snap, 1)
-                    Diagnostic(s, en, Severity.ERROR, msg, "smali")
-                }
-            }
-        } catch (e: Exception) {
-            val (s, en) = lineRange(snap, 1)
-            listOf(Diagnostic(s, en, Severity.ERROR, e.message ?: e.javaClass.simpleName, "smali"))
+            // Сборка останавливается на первой ошибке: одна отметка — на её строке
+            val (s, en) = lineRange(snap, e.line.coerceAtLeast(1))
+            val msg = e.errors.firstOrNull()?.removePrefix("строка ${e.line}: ") ?: "Ошибка smali"
+            listOf(Diagnostic(s, en, Severity.ERROR, msg, "smali"))
         }
     }
 
@@ -444,6 +439,8 @@ object DiagnosticsEngine {
             var k = t.size - 3
             while (k >= 3 && t[k - 2] == t[k] && t[k - 1].let { it == Tok.STRING.ordinal || it == Tok.ESCAPE.ordinal || it == Tok.VARIABLE.ordinal }) k -= 3
             val s = base + t[k]
+            // Строка начата выше и тянется сюда (шаблон `…`, """…""") — это не новый литерал
+            if (t[k] == 0 && line > 0 && snap.endState(line - 1) != 0) continue
             val open = text[s]
             if (open != '"' && open != '\'' && open != '`') continue
             if (text.startsWith("\"\"\"", s) || open == '`') continue
@@ -651,3 +648,6 @@ object JsonChecker {
 
 
 private const val MAX_OUTPUT_BYTES = 4 shl 20
+
+/** Конфиги zsh без расширения .zsh (с точкой в начале или без). */
+private val ZSH_FILES = setOf("zshrc", "zshenv", "zprofile", "zlogin", "zlogout")

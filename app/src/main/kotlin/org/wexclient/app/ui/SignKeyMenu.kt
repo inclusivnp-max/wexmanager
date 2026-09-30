@@ -149,7 +149,7 @@ fun SignKeyButton(
             modifier = Modifier.height(42.dp)
         ) {
             if (signing) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onTertiary)
+                WexSpinner(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onTertiary)
             } else {
                 Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
             }

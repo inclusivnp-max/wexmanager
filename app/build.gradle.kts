@@ -22,8 +22,11 @@ dependencies {
 
     // MT Manager Core Engines
     implementation("org.smali:dexlib2:2.5.2")
-    implementation("org.smali:baksmali:2.5.2")
-    implementation("org.smali:smali:2.5.2")
+    // smali/baksmali — только тестам (сборка фикстур); в программе smali ⇄ DEX делает clazzpatcher
+    testImplementation("org.smali:baksmali:2.5.2")
+    testImplementation("org.smali:smali:2.5.2")
+    // DEX ⇄ smali и DEX → .class без сторонних библиотек (settings.gradle.kts: includeBuild)
+    implementation("com.tim:clazzpatcher:1.0")
     implementation("io.github.skylot:jadx-core:1.5.6")
     implementation("io.github.skylot:jadx-dex-input:1.5.6")
     implementation("com.android.tools.build:apksig:8.5.0")
@@ -60,6 +63,69 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
+/**
+ * Доступ к X11-пиру фокуса AWT: закрытое окно из него убирает util/SwingLeaks.kt — под Wayland сам AWT
+ * этого не делает, и последний закрытый диалог оставался в памяти целиком.
+ */
+val awtX11Exports = "--add-exports=java.desktop/sun.awt.X11=ALL-UNNAMED"
+
+/**
+ * glibc не возвращает системе память, освобождённую в аренах malloc (Skia, драйвер, JNA — у каждого потока своя
+ * арена): за три часа работы там лежало 288 МБ свободного (замер malloc_trim на живом процессе). JVM раз в минуту
+ * отдаёт их сама, в своём потоке. Только Linux с glibc — на Windows флаг не нужен.
+ */
+val trimNativeHeap = "-XX:TrimNativeHeapInterval=60000"
+
+/**
+ * skiko (FrameWatcher) каждые 30 с, если за них нарисовано больше 1000 кадров, зовёт System.gc() — так он
+ * освобождает нативную память Skia. У G1 это полная сборка с остановкой всех потоков: 33 мс рывка раз в
+ * полминуты при анимированном фоне или консоли. С этим флагом та же сборка идёт параллельно (паузы 2–4 мс, изредка до 14),
+ * а объекты Skia освобождаются так же. Касается и NativeMemory.releaseSoon.
+ */
+val concurrentExplicitGc = "-XX:+ExplicitGCInvokesConcurrent"
+
+/**
+ * В простое (нет кадров — FrameWatcher не срабатывает, аллокаций нет) сборка не приходит годами, и нативная
+ * память Skia от закрытых картинок и окон так и висит. После 2 минут без единой сборки — полная сборка:
+ * она же сжимает кучу (параллельный цикл G1 её не отдаёт). Пауза ~30 мс приходится на простой, когда её
+ * некому заметить; в работе сборки идут постоянно, и эта не срабатывает.
+ * Замер (простой с окном в фокусе): куча 184 → 57 МБ, RSS 674 → 566 МБ.
+ */
+val idleGc = listOf("-XX:G1PeriodicGCInterval=120000", "-XX:-G1PeriodicGCInvokesConcurrent")
+
+/**
+ * G1 по умолчанию расширяет кучу, когда сборка занимает больше ~8 % времени: всплеск при старте (классы,
+ * шрифты, первая папка) раздувал её до 180 МБ при 25–30 МБ живых данных, и так она и оставалась.
+ * С 20 % — 57 МБ, паузы те же (замер со спиннером в консоли: RSS 696 → 591 МБ).
+ */
+val heapGrowth = "-XX:GCTimeRatio=4"
+
+/**
+ * Переменные окружения, которые нужны процессу до старта JVM (флагом их не задать):
+ *  - MALLOC_ARENA_MAX=2: glibc заводит арену malloc чуть ли не на каждый поток (до 8 × ядер). В 78 аренах
+ *    живого процесса лежало 510 МБ свободной памяти, которую ни malloc_trim, ни TrimNativeHeap не вернули —
+ *    куски разбросаны по аренам. С двумя аренами на стенде: 336 → 199 МБ malloc, CPU тот же.
+ *  - __GL_YIELD=USLEEP: драйвер NVIDIA ждёт glFinish после vsync (так делает skiko) в холостом цикле
+ *    на clock_gettime — четверть загрузки потока окна. С USLEEP он спит. Прочим драйверам всё равно.
+ * Заданное пользователем не перебиваем; исходное значение — в WEX_ORIG_* для программ из консоли (ChildEnv).
+ */
+val nativeEnv = mapOf("MALLOC_ARENA_MAX" to "2", "__GL_YIELD" to "USLEEP")
+
+tasks.named<CreateStartScripts>("startScripts") {
+    // Копия: лямбда doLast не может держать ссылку на сам скрипт (configuration cache)
+    val env = nativeEnv.toMap()
+    doLast {
+        val script = unixScript
+        val exports = env.entries.joinToString("\n", postfix = "\n") { (k, v) ->
+            "[ -z \"\${WEX_ORIG_$k+x}\" ] && export WEX_ORIG_$k=\"\${$k+=\$$k}\"\nexport $k=\"\${$k:-$v}\""
+        }
+        val marker = "\nexec \"\$JAVACMD\" \"\$@\""
+        val text = script.readText()
+        check(marker in text) { "Не нашлась строка запуска Java в ${script.name}" }
+        script.writeText(text.replace(marker, "\n# Окружение процесса WEX (см. nativeEnv в build.gradle.kts)\n$exports$marker"))
+    }
+}
+
 application {
     // Define the Fully Qualified Name for the application main class
     // (Note that Kotlin compiles `App.kt` to a class with FQN `com.example.app.AppKt`.)
@@ -71,8 +137,12 @@ application {
         "-Dswing.aatext=true",
         // Пути с кириллицей/иероглифами и буфер обмена не должны зависеть от локали запуска
         "-Dfile.encoding=UTF-8",
-        "-Dsun.jnu.encoding=UTF-8"
-    )
+        "-Dsun.jnu.encoding=UTF-8",
+        awtX11Exports,
+        trimNativeHeap,
+        concurrentExplicitGc,
+        heapGrowth
+    ) + idleGc
 }
 
 tasks.withType<Test>().configureEach {
@@ -82,11 +152,14 @@ tasks.withType<Test>().configureEach {
     systemProperty("user.home", testHome.absolutePath)
     // Остальное настоящее (корзины других разделов, настройки Gear Lever) тесты не видят
     systemProperty("wex.isolated", "true")
+    jvmArgs(awtX11Exports)
     doFirst { testHome.mkdirs() }
 }
 
 tasks.withType<JavaExec>().configureEach {
+    val nativeEnvCopy = nativeEnv.toMap()
     environment("_JAVA_AWT_WM_NONREPARENTING", "1")
+    nativeEnvCopy.forEach { (k, v) -> if (System.getenv(k) == null) environment(k, v) }
     systemProperty("skiko.renderApi", "OPENGL")
     systemProperty("compose.swing.render.on.graphics", "true")
 }
@@ -154,8 +227,14 @@ val packageBinary = tasks.register<Exec>("packageBinary") {
         "--java-options", "-Dawt.useSystemAAFontSettings=on",
         "--java-options", "-Dswing.aatext=true",
         "--java-options", "-Dfile.encoding=UTF-8",
-        "--java-options", "-Dsun.jnu.encoding=UTF-8"
+        "--java-options", "-Dsun.jnu.encoding=UTF-8",
+        "--java-options", awtX11Exports,
+        "--java-options", concurrentExplicitGc,
+        "--java-options", heapGrowth,
+        "--java-options", idleGc[0],
+        "--java-options", idleGc[1]
     )
+    if (!windowsHost) options += listOf("--java-options", trimNativeHeap)
     if (icon.isFile) options += listOf("--icon", icon.absolutePath)
     if (windowsHost) {
         options += listOf(

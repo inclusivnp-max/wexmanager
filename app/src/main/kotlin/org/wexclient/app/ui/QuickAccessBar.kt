@@ -84,8 +84,8 @@ fun QuickAccessBar(
     otherPaneOnRight: Boolean = true,
     onMessage: (String) -> Unit = {},
     onOpenTrash: (() -> Unit)? = null,
-    /** Отключиться от сервера, на котором сейчас панель. */
-    onDisconnect: ((org.wexclient.app.vfs.ssh.SshFileSystem) -> Unit)? = null,
+    /** Отключиться от сервера или телефона, на котором сейчас панель. */
+    onDisconnect: ((org.wexclient.app.vfs.remote.RemoteFileSystem) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val scroll = rememberScrollState()
@@ -101,10 +101,11 @@ fun QuickAccessBar(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Панель на сервере — это видно всегда, даже когда начало пути ушло за край
-        (currentPath.fileSystem as? org.wexclient.app.vfs.ssh.SshFileSystem)?.let { server ->
+        // Панель на сервере или телефоне — это видно всегда, даже когда начало пути ушло за край
+        (currentPath.fileSystem as? org.wexclient.app.vfs.remote.RemoteFileSystem)?.let { server ->
             ServerChip(
-                label = server.target.label,
+                label = server.label,
+                phone = server.kind == "adb",
                 onHome = { onNavigate(server.homePath()) },
                 onDisconnect = onDisconnect?.let { cb -> { cb(server) } }
             )
@@ -612,7 +613,7 @@ internal object PlaceProbe {
 
 /** Чип сервера: щелчок — домашняя папка на сервере, значок справа — отключиться. */
 @Composable
-private fun ServerChip(label: String, onHome: () -> Unit, onDisconnect: (() -> Unit)?) {
+private fun ServerChip(label: String, phone: Boolean, onHome: () -> Unit, onDisconnect: (() -> Unit)?) {
     Surface(
         shape = RoundedCornerShape(6.dp),
         color = NoctaliaPrimary.copy(alpha = 0.14f),
@@ -626,7 +627,12 @@ private fun ServerChip(label: String, onHome: () -> Unit, onDisconnect: (() -> U
                     .padding(start = 6.dp, end = if (onDisconnect != null) 4.dp else 6.dp, top = 3.dp, bottom = 3.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                SymbolIcon(SymbolRef("dns", codepoint = 0xe875), contentDescription = "Сервер", tint = NoctaliaPrimary, modifier = Modifier.size(14.dp))
+                SymbolIcon(
+                    if (phone) SymbolRef("smartphone") else SymbolRef("dns", codepoint = 0xe875),
+                    contentDescription = if (phone) "Телефон" else "Сервер",
+                    tint = NoctaliaPrimary,
+                    modifier = Modifier.size(14.dp)
+                )
                 Spacer(modifier = Modifier.width(3.dp))
                 Text(
                     label,

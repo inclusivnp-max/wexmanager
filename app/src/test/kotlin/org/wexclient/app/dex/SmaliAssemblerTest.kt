@@ -85,6 +85,29 @@ class SmaliAssemblerTest {
         engine.close()
     }
 
+    /** Класс собрали, пока DEX писался: запись не должна пометить его сохранённым (иначе он теряется при закрытии). */
+    @Test
+    fun `class compiled during a write stays unsaved`() {
+        val dex = assembleDex(helloSmali, otherSmali)
+        val engine = DexEditorEngine(listOf(DexSource("classes.dex", dex)))
+        val hello = engine.classes.first { it.fullName == "test.Hello" }
+        val source = engine.disassembleToSmali(hello)
+        engine.compileSmali(hello, source.replace("HelloOriginal", "HelloFirst"))
+        // Запись началась с этим номером…
+        val version = engine.currentEditVersion
+        engine.modifiedDex()
+        // …а пока она шла, класс собрали ещё раз
+        engine.compileSmali(hello, source.replace("HelloOriginal", "HelloSecond"))
+        engine.markSaved(version)
+        assertTrue(engine.hasUnsavedChanges)
+        // Следующая запись без новых сборок — всё сохранено
+        val next = engine.currentEditVersion
+        engine.modifiedDex()
+        engine.markSaved(next)
+        assertFalse(engine.hasUnsavedChanges)
+        engine.close()
+    }
+
     @Test
     fun `syntax errors are reported with line numbers`() {
         val dex = assembleDex(helloSmali)
@@ -110,10 +133,25 @@ class SmaliAssemblerTest {
     }
 
     @Test
-    fun `opcodes follow dex header version`() {
-        val dex = assembleDex(helloSmali)
-        val opcodes = SmaliAssembler.opcodesFor(dex)
-        assertTrue(opcodes.api >= 1)
-        assertEquals(Opcodes.getDefault().api, SmaliAssembler.opcodesFor(ByteArray(8)).api)
+    fun `build errors point at the instruction line`() {
+        // v5 при .registers 1 — ошибка сборки, а не разбора: строка всё равно та самая
+        val broken = helloSmali.replace("return-object v0", "return-object v5")
+        val e = assertFailsWith<SmaliSyntaxException> { SmaliAssembler.assemble(broken) }
+        assertEquals(7, e.line)
+        assertTrue(e.message!!.startsWith("строка 7: "), e.message)
+    }
+
+    @Test
+    fun `smali of untouched class survives a rebuild byte for byte`() {
+        val dex = assembleDex(helloSmali, otherSmali)
+        val engine = DexEditorEngine(listOf(DexSource("classes.dex", dex)))
+        val hello = engine.classes.first { it.fullName == "test.Hello" }
+        val other = engine.classes.first { it.fullName == "test.Other" }
+        val otherBefore = engine.disassembleToSmali(other)
+        engine.compileSmali(hello, engine.disassembleToSmali(hello).replace("HelloOriginal", "Patched"))
+        val rebuilt = DexEditorEngine(listOf(DexSource("classes.dex", engine.modifiedDex()[0].bytes)))
+        assertEquals(otherBefore, rebuilt.disassembleToSmali(rebuilt.classes.first { it.fullName == "test.Other" }))
+        engine.close()
+        rebuilt.close()
     }
 }

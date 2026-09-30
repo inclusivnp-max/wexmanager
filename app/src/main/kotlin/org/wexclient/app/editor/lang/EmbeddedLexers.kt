@@ -44,12 +44,29 @@ class HeredocLexer(private val inner: LineLexer) : LineLexer {
             // "<<" внутри строки или комментария — не here-doc; "<<<" — here-string
             if (line.startsWith("<<<", pos) || (pos > 0 && line[pos - 1] == '<')) continue
             val covering = out.lastOrNull { it.start <= pos && pos < it.end }
-            if (covering != null && (covering.type == Tok.STRING || covering.type == Tok.COMMENT)) continue
+            if (covering != null && (covering.type == Tok.STRING || covering.type == Tok.COMMENT || covering.type == Tok.VARIABLE)) continue
+            // $((1 << n)) и (( m |= 1 << bit )) — сдвиг в арифметике, а не here-doc: иначе остаток
+            // файла подсвечивался строкой, а функции пропадали из структуры
+            if (insideArithmetic(line, pos)) continue
             out.add(Token(pos, m.range.last + 1, Tok.META))
             val dash = if (m.groupValues[1] == "-") DASH else 0
             return FLAG or dash or idOf(m.groupValues[3])
         }
         return end
+    }
+
+    /** Позиция внутри незакрытого «((» (арифметика shell). */
+    private fun insideArithmetic(line: String, pos: Int): Boolean {
+        var open = 0
+        var i = 0
+        while (i < pos - 1) {
+            when {
+                line[i] == '(' && line[i + 1] == '(' -> { open++; i += 2 }
+                line[i] == ')' && line[i + 1] == ')' && open > 0 -> { open--; i += 2 }
+                else -> i++
+            }
+        }
+        return open > 0
     }
 }
 
@@ -60,7 +77,7 @@ class HeredocLexer(private val inner: LineLexer) : LineLexer {
  * с 8-го — состояние вложенного лексера.
  */
 class HtmlLexer(private val js: LineLexer, private val css: LineLexer) : LineLexer {
-    private val openTag = Regex("<(script|style)(?=[\\s>/])", RegexOption.IGNORE_CASE)
+    private val openTag = Regex("<(script|style)(?=[\\s>/]|$)", RegexOption.IGNORE_CASE)
 
     override fun tokenize(line: String, state: Int, out: MutableList<Token>): Int {
         val n = line.length

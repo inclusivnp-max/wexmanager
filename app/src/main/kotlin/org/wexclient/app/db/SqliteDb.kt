@@ -227,14 +227,17 @@ class SqliteDb private constructor(
     }
 
     private fun readValue(type: Long, record: ByteArray, at: Int): Pair<SqlValue, Int> {
-        fun need(n: Int) {
-            if (at + n > record.size) throw SqliteFormatException("Значение обрывается на краю записи")
+        // Размер считается в Long: тип — varint до 2^64, и на испорченном файле toInt() давал отрицательный
+        // размер, проверка края проходила, а copyOfRange/String падали непредусмотренным исключением
+        fun need(n: Long): Int {
+            if (n < 0 || at + n > record.size) throw SqliteFormatException("Значение обрывается на краю записи")
+            return n.toInt()
         }
         return when {
             type == 0L -> SqlValue.Null to 0
             type in 1L..6L -> {
                 val size = when (type.toInt()) { 5 -> 6; 6 -> 8; else -> type.toInt() }
-                need(size)
+                need(size.toLong())
                 var v = record[at].toLong() // старший байт со знаком
                 for (i in 1 until size) v = (v shl 8) or (record[at + i].toLong() and 0xFF)
                 SqlValue.Integer(v) to size
@@ -250,13 +253,11 @@ class SqliteDb private constructor(
             // 10 и 11 — служебные, в обычных записях не встречаются
             type < 12L -> SqlValue.Null to 0
             type % 2 == 0L -> {
-                val size = ((type - 12) / 2).toInt()
-                need(size)
+                val size = need((type - 12) / 2)
                 SqlValue.Blob(record.copyOfRange(at, at + size)) to size
             }
             else -> {
-                val size = ((type - 13) / 2).toInt()
-                need(size)
+                val size = need((type - 13) / 2)
                 SqlValue.Text(String(record, at, size, encoding)) to size
             }
         }

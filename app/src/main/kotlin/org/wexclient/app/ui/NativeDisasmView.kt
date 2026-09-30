@@ -96,7 +96,7 @@ fun NativeDisasmTab(doc: ElfDocument, docVersion: Int) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                CircularProgressIndicator(color = NoctaliaPrimary)
+                WexSpinner(color = NoctaliaPrimary)
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     text = "Дизассемблирую… (первый прогон долгий)",

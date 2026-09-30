@@ -38,11 +38,12 @@ object ErrorLog {
             if (Files.exists(f) && Files.size(f) > LIMIT) {
                 Files.move(f, f.resolveSibling("errors.log.1"), StandardCopyOption.REPLACE_EXISTING)
             }
-            if (!Files.exists(f)) {
+            // На NTFS прав POSIX нет — там файл создаёт сама запись (CREATE)
+            if (!Files.exists(f) && "posix" in f.fileSystem.supportedFileAttributeViews()) {
                 Files.createFile(f, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
             }
             val text = LocalDateTime.now().format(TIME) + "  " + what + "\n" + error.stackTraceToString() + "\n"
-            Files.writeString(f, text, StandardOpenOption.APPEND)
+            Files.writeString(f, text, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
         }
     }
 

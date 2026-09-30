@@ -9,7 +9,7 @@ import java.util.jar.Manifest
 
 /**
  * Java-движок на Vineflower (живой наследник Fernflower):
- * DEX -> .class через dex2jar -> Java через Vineflower.
+ * DEX -> .class (d2c, запасной — dex2jar, [DexJarCache]) -> Java через Vineflower.
  *
  * Vineflower обычно аккуратнее CFR/JADX восстанавливает generics, enum'ы,
  * try-with-resources и сложные условия — имеет смысл смотреть все три вкладки.
@@ -25,62 +25,59 @@ class VineflowerEngine(
     private val cache = jarCache ?: DexJarCache(sources)
     private val ownsCache = jarCache == null
 
-    private val workDir = org.wexclient.app.util.ProcessScratch.work.newDir("vf-").toFile()
+    internal val workDir = org.wexclient.app.util.ProcessScratch.work.newDir("vf-").toFile()
 
+    // Имя класса с точками -> Java
     private val javaByClass = ConcurrentHashMap<String, String>()
 
     fun decompileToJava(fullName: String): String {
-        javaByClass[fullName]?.let { return it }
-        javaByClass[fullName.replace('.', '/')]?.let { return it }
-        val saver = CollectingSaver()
-        try {
-            // 1. Транслированные jar'ы (один раз на всех, дальше из кэша)
-            val jars = cache.getJars()
-
-            // 2. Байты нужного класса -> временная package-директория
+        val key = fullName.replace('/', '.')
+        javaByClass[key]?.let { return it }
+        return try {
+            // Трансляция DEX -> jar одна на всех (дальше из кэша), Vineflower — только на этом классе
             val entryName = fullName.replace('.', '/') + ".class"
-            var classBytes: ByteArray? = null
-            for (jar in jars) {
-                classBytes = DexToJar.readEntry(jar, entryName)
-                if (classBytes != null) break
+            val first = decompileFrom(cache.jarsFor(entryName), entryName, fullName, key)
+                ?: return "// Vineflower: класс $fullName не найден в транслированном jar"
+            val java = DexToJar.secondOpinion(first, FAILED) {
+                cache.alternativeJarsFor(entryName)?.let { decompileFrom(it, entryName, fullName, key) }
             }
-            if (classBytes == null) {
-                return "// Vineflower: класс $fullName не найден в транслированном jar"
-            }
-            val singleDir = workDir.resolve("single").apply { mkdirs() }
-            singleDir.resolve(entryName).apply {
+            javaByClass[key] = java
+            java
+        } catch (e: Exception) {
+            "// Vineflower недоступен: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    /** Java класса из первого jar, где он есть; null — ни в одном. */
+    private fun decompileFrom(jars: List<String>, entryName: String, fullName: String, key: String): String? {
+        val classBytes = DexToJar.readFirst(jars, entryName) ?: return null
+        val saver = CollectingSaver()
+        // Своя папка на каждый вызов: в общей копились все открытые раньше классы, и Vineflower
+        // заново разбирал их все (N-й класс — N декомпиляций), а временные файлы только росли
+        val dir = java.nio.file.Files.createTempDirectory(workDir.toPath(), "single-").toFile()
+        try {
+            dir.resolve(entryName).apply {
                 parentFile.mkdirs()
                 writeBytes(classBytes)
             }
-
-            // 3. Vineflower только на этом классе
             val decompiler = BaseDecompiler(saver, options(), IFernflowerLogger.NO_OP)
-            decompiler.addSource(singleDir)
+            decompiler.addSource(dir)
             decompiler.decompileContext()
 
-            // Индексируем под обе нотации имени (точки и слэши)
-            saver.classes.forEach { (name, content) ->
-                javaByClass[name] = content
-                javaByClass[name.replace('/', '.')] = content
-                javaByClass[name.replace('.', '/')] = content
-            }
-
-            javaByClass[fullName]?.let { return it }
-            javaByClass[fullName.replace('.', '/')]?.let { return it }
+            // Одна запись на класс; имя приводится к нотации с точками
+            val out = saver.classes.mapKeys { it.key.replace('/', '.') }
+            out[key]?.let { return it }
             // Запасной вариант для вложенных классов с другой нотацией имени
             val simple = fullName.substringAfterLast('.')
-            javaByClass.entries.firstOrNull { (k, _) ->
-                k.substringAfterLast('/').substringAfterLast('.') == simple
-            }?.let { return it.value }
+            out.entries.firstOrNull { (k, _) -> k.substringAfterLast('.') == simple }?.let { return it.value }
             return "// Vineflower: класс $fullName не декомпилирован"
-        } catch (e: Exception) {
-            return "// Vineflower недоступен: ${e.message ?: e.javaClass.simpleName}"
         } finally {
             try {
                 saver.close()
             } catch (_: Exception) {
                 // ignore
             }
+            runCatching { org.wexclient.app.util.FileTree.delete(dir) }
         }
     }
 
@@ -97,6 +94,9 @@ class VineflowerEngine(
     }
 
     companion object {
+        /** Пометка Vineflower у метода, который он не собрал. */
+        private val FAILED = arrayOf("Couldn't be decompiled")
+
         internal fun options(): Map<String, Any> = mapOf(
             IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES to "1",
             IFernflowerPreferences.DECOMPILE_ENUM to "1",

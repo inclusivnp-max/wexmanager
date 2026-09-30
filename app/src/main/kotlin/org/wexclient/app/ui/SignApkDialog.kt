@@ -354,7 +354,7 @@ fun SignApkDialog(
                         modifier = Modifier.height(42.dp)
                     ) {
                         if (isSigning) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                            WexSpinner(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                         } else {
                             SymbolIcon(SymbolRef("key"), null, modifier = Modifier.size(18.dp))
                         }

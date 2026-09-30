@@ -59,8 +59,8 @@ object FileTransfers {
 
     /** Источники, чьё имя уже занято в [targetDir] (дубли в той же папке — не конфликт). */
     fun conflicts(sources: List<Path>, targetDir: Path): List<Path> {
-        // На сервере — один список папки вместо запроса по сети на каждое имя
-        val remoteNames: Set<String>? = if (targetDir.fileSystem is org.wexclient.app.vfs.ssh.SshFileSystem) {
+        // На сервере и телефоне — один список папки вместо запроса на каждое имя
+        val remoteNames: Set<String>? = if (targetDir.fileSystem is org.wexclient.app.vfs.remote.RemoteFileSystem) {
             runCatching { Files.list(targetDir).use { s -> s.map { it.fileName.toString() }.toList().toHashSet() } }.getOrNull()
         } else null
         return sources.filter { src ->

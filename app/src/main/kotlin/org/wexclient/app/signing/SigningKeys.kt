@@ -530,7 +530,8 @@ object SigningKeys {
     }
 
     private fun keytool(): String {
-        val bundled = File(System.getProperty("java.home"), "bin/keytool")
+        val exe = if (File.separatorChar == '\\') "keytool.exe" else "keytool"
+        val bundled = File(System.getProperty("java.home"), "bin/$exe")
         return if (bundled.canExecute()) bundled.absolutePath else "keytool"
     }
 

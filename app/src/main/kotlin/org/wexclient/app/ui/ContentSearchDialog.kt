@@ -309,7 +309,7 @@ fun ContentSearchDialog(
                         )
                     }
                     if (state.running) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
+                        WexSpinner(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                     }
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = MaterialTheme.colorScheme.outline)
@@ -380,7 +380,7 @@ fun ContentSearchDialog(
                                 }
                             }
                         }
-                        state.running -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center), color = NoctaliaPrimary)
+                        state.running -> WexSpinner(modifier = Modifier.align(Alignment.Center), color = NoctaliaPrimary)
                         error != null -> Text(
                             error,
                             color = NoctaliaDanger,

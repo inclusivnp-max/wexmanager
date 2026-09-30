@@ -32,12 +32,16 @@ import java.nio.file.Paths
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.min
 import com.jediterm.core.Color as JColor
 import org.wexclient.app.util.ChildEnv
 
-/** Оболочки системы: из /etc/passwd, $SHELL и /etc/shells. */
+/** Оболочки системы: из /etc/passwd, $SHELL и /etc/shells; на Windows — PowerShell и cmd. */
 object ShellLocator {
+    private val isWindows = File.separatorChar == '\\'
+
     fun loginShell(): String {
+        if (isWindows) return windowsShells().first()
         val user = System.getProperty("user.name")
         val fromPasswd = runCatching {
             File("/etc/passwd").useLines { lines ->
@@ -50,6 +54,7 @@ object ShellLocator {
 
     /** Установленные оболочки без дублей (/bin и /usr/bin — одно и то же). */
     fun available(): List<String> {
+        if (isWindows) return windowsShells()
         val listed = runCatching { File("/etc/shells").readLines() }.getOrDefault(emptyList())
             .map { it.trim() }.filter { it.startsWith("/") && File(it).canExecute() }
         val byName = LinkedHashMap<String, String>()
@@ -60,6 +65,19 @@ object ShellLocator {
         }
         return byName.values.toList()
     }
+
+    /** PowerShell 7 (если стоит), встроенный PowerShell и cmd — полными путями: настройка проверяет файл. */
+    private fun windowsShells(): List<String> {
+        val root = System.getenv("SystemRoot") ?: "C:\\Windows"
+        return listOfNotNull(
+            org.wexclient.app.util.ProcessRunner.which("pwsh"),
+            "$root\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            System.getenv("ComSpec") ?: "$root\\System32\\cmd.exe"
+        ).filter { File(it).isFile }.distinct().ifEmpty { listOf("cmd.exe") }
+    }
+
+    /** Имя оболочки для заголовка вкладки: fish, powershell.exe. */
+    fun displayName(shell: String): String = shell.substringAfterLast('/').substringAfterLast('\\')
 }
 
 /**
@@ -102,6 +120,12 @@ private class DaemonExecutors(name: String) : TerminalExecutorServiceManager {
         single.shutdown()
         pool.shutdown()
     }
+
+    /** Сеанс закрыт: очередь записи в оболочку больше некому читать — недописанное бросаем. */
+    fun shutdownNow() {
+        single.shutdownNow()
+        pool.shutdownNow()
+    }
 }
 
 /** Предугадывание ввода (type-ahead) выключено: локальный терминал отвечает мгновенно. */
@@ -140,9 +164,9 @@ class TerminalSession(
     val id: Int,
     val startDir: Path,
     val shell: String = ShellLocator.loginShell(),
-    /** Своя команда вместо оболочки — ssh-сеанс на сервере; null — оболочка [shell]. */
+    /** Своя команда вместо оболочки — ssh на сервер или adb shell на телефон; null — оболочка [shell]. */
     val command: List<String>? = null,
-    /** Сервер (user@host) для ssh-сеанса: консоль серверной панели. */
+    /** Где идёт сеанс («ssh user@host», «adb Pixel 9»): консоль панели на сервере или телефоне. */
     val remote: String? = null,
     initialColumns: Int = 100,
     initialRows: Int = 30,
@@ -153,7 +177,7 @@ class TerminalSession(
     /** Растёт при каждом изменении экрана — ключ перерисовки. */
     var version by mutableLongStateOf(0L)
         private set
-    var title by mutableStateOf(remote?.let { "ssh $it" } ?: shell.substringAfterLast('/'))
+    var title by mutableStateOf(remote ?: ShellLocator.displayName(shell))
         private set
     var exitCode by mutableStateOf<Int?>(null)
         private set
@@ -352,7 +376,7 @@ class TerminalSession(
                 starter = s
                 // Команды, отправленные до запуска (кнопка «Запуск»): оболочка прочтёт их после старта
                 if (pendingInput.isNotEmpty()) {
-                    s.sendString(pendingInput.toString(), true)
+                    s.sendString(pendingInput.toString(), false)
                     pendingInput.setLength(0)
                 }
             }
@@ -383,10 +407,12 @@ class TerminalSession(
 
     private val pendingInput = StringBuilder()
 
+    // userInput = false: с true JediTerm заводит объект предугадывания на каждый символ, а предугадывание
+    // выключено — вставка в мегабайт оборачивалась миллионом лишних объектов
     fun sendText(text: String) {
         if (text.isEmpty()) return
         scrollOrigin = 0
-        starter?.sendString(text, true)
+        starter?.sendString(text, false)
     }
 
     /** Как [sendText], но до запуска оболочки текст копится и уходит сразу после старта. */
@@ -399,7 +425,7 @@ class TerminalSession(
                 return
             }
             scrollOrigin = 0
-            s.sendString(text, true)
+            s.sendString(text, false)
         }
     }
 
@@ -409,13 +435,47 @@ class TerminalSession(
         if (ScriptRunner.hasControlChars(where) || ScriptRunner.hasControlChars(command)) {
             throw java.io.IOException("В имени есть управляющие символы — такую команду безопаснее набрать вручную")
         }
+        if (windowsShell) {
+            // PowerShell 5.1 не знает «&&»: команда — только если переход удался
+            val line = if (isCmd) "${windowsCd(where)} && $command" else "${windowsCd(where)}; if (\$?) { $command }"
+            // До запуска оболочки стирать нечего
+            if (starter == null) sendWhenReady("$line\r") else sendWindowsLine("$line\r")
+            return
+        }
         sendWhenReady("\u0015cd -- ${ScriptRunner.word(where)} && $command\r")
     }
 
+    /**
+     * Windows: набранное стирает Esc, но winpty и ConPTY читают «Esc + символ» одной порцией как Alt+символ —
+     * команда приклеивалась бы к набранному. Esc уходит отдельно, команда — следом через 60 мс, тем же
+     * потоком записи (порядок сохраняется).
+     */
+    private fun sendWindowsLine(line: String) {
+        sendText("\u001b")
+        runCatching {
+            executors.singleThreadScheduledExecutor.schedule({ sendText(line) }, 60, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }.onFailure { sendText(line) }
+    }
+
+    /** Своя оболочка Windows (PowerShell или cmd), а не ssh/adb: у неё свой синтаксис. */
+    private val windowsShell: Boolean get() = File.separatorChar == '\\' && command == null && remote == null
+    private val isCmd: Boolean get() = ShellLocator.displayName(shell).equals("cmd.exe", ignoreCase = true)
+
+    /**
+     * Переход в папку для оболочки Windows. В PowerShell внутри '…' особые только кавычки
+     * (и типографские ‘’‚‛ — их PowerShell тоже считает кавычками): удваиваем. В cmd кавычки
+     * в имени файла невозможны. Набранное стирает Esc — Ctrl+U там не работает.
+     */
+    private fun windowsCd(where: String): String =
+        if (isCmd) "cd /d \"$where\""
+        else "Set-Location -LiteralPath '" + where.replace(Regex("['\u2018\u2019\u201A\u201B]")) { it.value + it.value } + "'"
+
     fun sendBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
+        // Ctrl+C прерывает и недописанную вставку: иначе он ждал бы в очереди, пока оболочка переварит весь текст
+        if (bytes.size == 1 && bytes[0] == ETX) cancelPaste()
         scrollOrigin = 0
-        starter?.sendBytes(bytes, true)
+        starter?.sendBytes(bytes, false)
     }
 
     /** Код клавиши (VK_*) с модификаторами (маски InputEvent) — последовательность для приложения. */
@@ -427,9 +487,45 @@ class TerminalSession(
         return true
     }
 
-    /** Вставка с заменой переводов строк на CR и режимом bracketed paste. */
+    /** Растёт при Ctrl+C и закрытии: вставки, начатые раньше, дальше не пишутся. */
+    private val pasteTicket = AtomicInteger()
+
+    private fun cancelPaste() {
+        pasteTicket.incrementAndGet()
+    }
+
+    /**
+     * Вставка с заменой переводов строк на CR и режимом bracketed paste. Текст уходит в оболочку
+     * кусками: раньше он писался одним вызовом, и поток записи висел, пока оболочка не прочтёт
+     * всё (fish разбирает 250 КБ секунд пять) — Ctrl+C и закрытие вкладки ждали за ним в очереди.
+     * Теперь между кусками проверяется отмена, и после неё дописывается только конец рамки.
+     */
     fun paste(text: String) {
-        sendText(preparePaste(text, bracketedPaste))
+        val c = connector ?: return
+        if (starter == null) return
+        val body = preparePaste(text, bracketed = false).toByteArray(Charsets.UTF_8)
+        if (body.isEmpty()) return
+        val bracketed = bracketedPaste
+        val ticket = pasteTicket.get()
+        scrollOrigin = 0
+        // Тот же поток, что пишет нажатия и ответы эмулятора: набранное после вставки придёт после неё
+        runCatching {
+            executors.singleThreadScheduledExecutor.execute { writePaste(c, body, bracketed, ticket) }
+        }
+    }
+
+    private fun writePaste(c: PtyConnector, body: ByteArray, bracketed: Boolean, ticket: Int) {
+        runCatching {
+            if (bracketed) c.write(PASTE_START)
+            var from = 0
+            while (from < body.size && pasteTicket.get() == ticket && !closed) {
+                val to = pasteChunkEnd(body, from, PASTE_CHUNK)
+                c.write(body.copyOfRange(from, to))
+                from = to
+            }
+            // Рамку закрываем и после отмены — иначе оболочка так и ждала бы конца вставки
+            if (bracketed && !closed) c.write(PASTE_END)
+        }
     }
 
     /** Текущая папка оболочки (по /proc). У ssh-сеанса она на сервере — не знаем. */
@@ -444,6 +540,10 @@ class TerminalSession(
         // Что идёт на сервере, отсюда не видно — считаем занятым и ничего не набираем за пользователя
         if (remote != null) return true
         val p = pid ?: return false
+        // Windows: /proc нет — занята, если у оболочки есть живой дочерний процесс
+        if (File.separatorChar == '\\') return runCatching {
+            ProcessHandle.of(p).map { h -> h.children().anyMatch { it.isAlive } }.orElse(false)
+        }.getOrDefault(true)
         return runCatching {
             val stat = File("/proc/$p/stat").readText()
             // После «(имя)»: состояние, ppid, pgrp, session, tty_nr, tpgid
@@ -460,7 +560,8 @@ class TerminalSession(
         val where = dir.toString()
         // Экранирование '…'\''…' в fish обходилось именем с «\»; управляющие символы сработали бы как клавиши
         if (ScriptRunner.hasControlChars(where)) return false
-        sendText("\u0015cd -- ${ScriptRunner.word(where)}\r")
+        if (windowsShell) sendWindowsLine("${windowsCd(where)}\r")
+        else sendText("\u0015cd -- ${ScriptRunner.word(where)}\r")
         return true
     }
 
@@ -472,7 +573,8 @@ class TerminalSession(
     fun resetTerminal() {
         // Ctrl+C — бросить недонабранное, иначе команда приклеится к нему
         sendBytes(byteArrayOf(3))
-        sendText("stty sane; printf '\u001bc'\r")
+        // stty и printf в PowerShell и cmd нет; cls есть в обоих
+        if (windowsShell) sendText("cls\r") else sendText("stty sane; printf '\u001bc'\r")
     }
 
     fun clearScreenAndHistory() {
@@ -571,6 +673,21 @@ class TerminalSession(
 
     companion object {
         private const val ESC = '\u001B'
+        private const val ETX: Byte = 3
+
+        private val PASTE_START = "$ESC[200~".toByteArray()
+        private val PASTE_END = "$ESC[201~".toByteArray()
+
+        /** Кусок вставки: столько же вмещает очередь ввода PTY — отмена срабатывает почти сразу. */
+        private const val PASTE_CHUNK = 4096
+
+        /** Конец куска вставки [from, результат): не больше [max] байт и не посреди символа UTF-8. */
+        internal fun pasteChunkEnd(bytes: ByteArray, from: Int, max: Int): Int {
+            var to = min(bytes.size, from + max)
+            // Байты продолжения символа — 10xxxxxx: отступаем к его началу
+            while (to < bytes.size && to > from + 1 && (bytes[to].toInt() and 0xC0) == 0x80) to--
+            return to
+        }
 
         /**
          * Перерисовка — на своём потоке, общем для всех вкладок: исполнитель JediTerm пишет в PTY
@@ -621,6 +738,7 @@ class TerminalSession(
     }
 
     private fun shutdown() {
+        cancelPaste()
         runCatching { starter?.requestEmulatorStop() }
         runCatching { starter?.close() }
         runCatching {
@@ -631,7 +749,7 @@ class TerminalSession(
             }
         }
         runCatching { connector?.close() }
-        executors.shutdownWhenAllExecuted()
+        executors.shutdownNow()
     }
 }
 

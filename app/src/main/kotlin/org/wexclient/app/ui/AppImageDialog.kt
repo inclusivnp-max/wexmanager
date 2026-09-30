@@ -142,7 +142,7 @@ fun AppImageDialog(
         ) {
             Column {
                 if (busy != null) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(3.dp), color = AppImageBlue)
+                    WexLinearSpinner(modifier = Modifier.fillMaxWidth().height(3.dp), color = AppImageBlue)
                 } else {
                     Spacer(modifier = Modifier.height(3.dp))
                 }
@@ -213,7 +213,7 @@ fun AppImageDialog(
                     when {
                         error != null -> NoticeCard(Icons.Default.Warning, NoctaliaError, "Не удалось прочитать образ: $error")
                         i == null -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 18.dp)) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = AppImageBlue)
+                            WexSpinner(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = AppImageBlue)
                             Spacer(modifier = Modifier.width(10.dp))
                             Text("Чтение образа…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                         }

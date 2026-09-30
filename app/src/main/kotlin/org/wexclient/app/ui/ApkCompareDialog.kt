@@ -147,7 +147,7 @@ private fun ApkComparePicker(
 
                 if (cards == null) {
                     Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = NoctaliaPrimary)
+                        WexSpinner(color = NoctaliaPrimary)
                     }
                 } else {
                     val old = if (swapped) cards!![1] else cards!![0]
@@ -419,7 +419,7 @@ private fun CompareProgressView(progress: CompareProgress) {
             Spacer(modifier = Modifier.height(10.dp))
             val fraction = progress.fraction
             if (fraction == null) {
-                androidx.compose.material3.LinearProgressIndicator(
+                WexLinearSpinner(
                     color = NoctaliaPrimary,
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier.fillMaxWidth().height(4.dp)

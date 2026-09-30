@@ -228,7 +228,7 @@ fun ApkDetailDialog(
                 val scrollState = rememberScrollState()
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (details == null) {
-                        CircularProgressIndicator(
+                        WexSpinner(
                             modifier = Modifier.align(Alignment.Center),
                             color = NoctaliaPrimary
                         )

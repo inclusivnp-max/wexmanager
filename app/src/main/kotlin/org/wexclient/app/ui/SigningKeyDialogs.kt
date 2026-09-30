@@ -197,7 +197,7 @@ private fun DialogButtons(
         Spacer(modifier = Modifier.width(8.dp))
         Button(onClick = onConfirm, enabled = enabled && !busy, colors = ButtonDefaults.buttonColors(containerColor = NoctaliaPrimary)) {
             if (busy) {
-                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                WexSpinner(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                 Spacer(modifier = Modifier.width(6.dp))
             }
             Text(confirmText)
@@ -547,7 +547,7 @@ fun ImportKeyDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     StoreCheck.Checking -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = NoctaliaPrimary)
+                        WexSpinner(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = NoctaliaPrimary)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Проверка пароля…", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -591,7 +591,7 @@ fun ImportKeyDialog(
         when {
             info != null -> KeyPreview(info, duplicate)
             checkingKey -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
-                CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = NoctaliaPrimary)
+                WexSpinner(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = NoctaliaPrimary)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Проверка ключа…", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -742,7 +742,7 @@ fun KeyInfoDialog(
     KeyDialogFrame("verified_user", key.title, key.alias?.let { "Псевдоним: $it" } ?: "", width = 620, onDismiss = onDismiss) {
         when {
             loading -> Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
+                WexSpinner(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Чтение сертификата…", fontSize = 13.sp)
             }

@@ -314,7 +314,7 @@ internal fun AdbInstallContent(
 
                     busy?.let {
                         Spacer(modifier = Modifier.height(8.dp))
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = NoctaliaPrimary)
+                        WexLinearSpinner(modifier = Modifier.fillMaxWidth(), color = NoctaliaPrimary)
                         Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
                     }
 
@@ -330,7 +330,7 @@ internal fun AdbInstallContent(
                             text = "Установите пакет android-tools:  sudo pacman -S android-tools"
                         )
                         firstLoad -> Box(modifier = Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = NoctaliaPrimary, modifier = Modifier.size(26.dp))
+                            WexSpinner(color = NoctaliaPrimary, modifier = Modifier.size(26.dp))
                         }
                         listError != null && devices.isEmpty() -> HintCard("error", NoctaliaError, "Ошибка adb", listError!!)
                         devices.isEmpty() -> HintCard(
@@ -386,7 +386,7 @@ internal fun AdbInstallContent(
                         Spacer(modifier = Modifier.height(12.dp))
                         SectionTitle("Журнал")
                         Spacer(modifier = Modifier.height(4.dp))
-                        if (installing) LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = NoctaliaPrimary)
+                        if (installing) WexLinearSpinner(modifier = Modifier.fillMaxWidth(), color = NoctaliaPrimary)
                         val logState = rememberLazyListState()
                         LaunchedEffect(log.size) { if (log.isNotEmpty()) logState.scrollToItem(log.lastIndex) }
                         Surface(
@@ -453,7 +453,7 @@ internal fun AdbInstallContent(
                             modifier = Modifier.height(40.dp)
                         ) {
                             if (installing) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                                WexSpinner(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                             } else {
                                 SymbolIcon(SymbolRef("install_mobile"), null, modifier = Modifier.size(18.dp))
                             }
@@ -595,7 +595,7 @@ internal fun DeviceRow(
 }
 
 @Composable
-private fun StatusChip(text: String, color: Color) {
+internal fun StatusChip(text: String, color: Color) {
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = color.copy(alpha = 0.14f),
@@ -611,7 +611,7 @@ private fun StatusChip(text: String, color: Color) {
 }
 
 @Composable
-private fun ToolButton(icon: String, text: String, enabled: Boolean, onClick: () -> Unit) {
+internal fun ToolButton(icon: String, text: String, enabled: Boolean, onClick: () -> Unit) {
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,

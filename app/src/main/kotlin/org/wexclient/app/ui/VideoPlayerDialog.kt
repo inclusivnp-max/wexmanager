@@ -57,6 +57,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -110,6 +111,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import org.wexclient.app.util.startHelper
+import org.wexclient.app.html.FrameHandoff
 
 data class VideoMetadata(
     val durationSec: Double = 0.0,
@@ -220,6 +222,8 @@ fun VideoPlayerDialog(
     var metadata by remember(currentEntry.path) { mutableStateOf<VideoMetadata?>(null) }
     var currentSeekSec by remember(currentEntry.path) { mutableStateOf(0.0) }
     var currentFrameBitmap by remember(currentEntry.path) { mutableStateOf<ImageBitmap?>(null) }
+    // Все кадры в currentFrameBitmap — через него: закрывает их окно, когда они уже не рисуются
+    val frames = remember(currentEntry.path) { FrameHandoff() }
     var isExtractingFrame by remember(currentEntry.path) { mutableStateOf(false) }
     var showInfoPanel by remember { mutableStateOf(false) }
     var captureNotification by remember { mutableStateOf<String?>(null) }
@@ -257,7 +261,10 @@ fun VideoPlayerDialog(
         val meta = metadata ?: return@LaunchedEffect
         if (isPlaying || settledArea == IntSize.Zero) return@LaunchedEffect
         val frame = withContext(Dispatchers.IO) { extractFrameAt(currentEntry, currentSeekSec, meta, decodeSize) }
-        if (frame != null && !isPlaying) currentFrameBitmap = frame
+        if (frame != null) {
+            // Уже играет — стоп-кадр не показываем и сразу закрываем
+            if (!isPlaying) frames.publish(frame) { currentFrameBitmap = it } else FrameHandoff.close(frame)
+        }
     }
 
     // Real-time high-performance in-dialog playback streaming engine
@@ -312,7 +319,6 @@ fun VideoPlayerDialog(
                 }
 
                 val frameLen = size.width * size.height * 4
-                val retiredFrames = ArrayDeque<SkiaBitmap>()
                 val input = java.io.DataInputStream(java.io.BufferedInputStream(videoProcess.inputStream, minOf(frameLen, 8 shl 20)))
                 val pixels = ByteArray(frameLen)
                 val frameMs = 1000.0 / (meta?.fps?.toDoubleOrNull()?.takeIf { it > 0.0 }?.coerceAtMost(60.0) ?: 30.0)
@@ -339,12 +345,11 @@ fun VideoPlayerDialog(
                         frameIndex++
                         // Не успеваем показывать — пропускаем кадр, чтобы видео не отставало от звука
                         if (late > 2 * frameMs) continue
-                        // Нативная память кадра освобождается сразу, а не когда соберёт GC:
-                        // закрываем кадр, отставший на два — он уже точно не рисуется
-                        val skia = bgraSkia(pixels, size)
-                        currentFrameBitmap = skia.asComposeImageBitmap()
-                        retiredFrames.addLast(skia)
-                        while (retiredFrames.size > 3) runCatching { retiredFrames.removeFirst().close() }
+                        // Окно не успевает показывать (свёрнуто, подвисло) — кадры не копим. Показанные
+                        // закрывает окно (FrameHandoff): отсюда не видно, рисуется ли ещё кадр,
+                        // и закрытый «на два назад» мог оказаться на экране
+                        if (frames.pending >= 3) continue
+                        frames.publish(bgraSkia(pixels, size).asComposeImageBitmap()) { currentFrameBitmap = it }
 
                         val totalSec = metadata?.durationSec ?: 0.0
                         if (totalSec > 0 && framePos >= totalSec) {
@@ -495,6 +500,16 @@ fun VideoPlayerDialog(
                         }
                     }
 
+                    // Кадры закрываются в той же композиции окна, где сменилась картинка: кадр
+                    // старше показанного уже не рисуется; сменилось видео или окно закрыто — все
+                    DisposableEffect(frames) {
+                        onDispose { frames.releaseAll() }
+                    }
+                    DisposableEffect(frames, currentFrameBitmap) {
+                        currentFrameBitmap?.let(frames::shown)
+                        onDispose { }
+                    }
+
                     // Main Preview Canvas + Inspector
                     Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         // Video Frame Preview Canvas (isolated composable to prevent dialog-level recomposition)
@@ -625,7 +640,7 @@ fun VideoPlayerDialog(
                                                 val bmp = withContext(Dispatchers.IO) {
                                                     extractFrameAt(currentEntry, currentSeekSec, metadata, decodeSize)
                                                 }
-                                                if (bmp != null) currentFrameBitmap = bmp
+                                                if (bmp != null) frames.publish(bmp) { currentFrameBitmap = it }
                                                 isExtractingFrame = false
                                             }
                                         }
@@ -664,7 +679,7 @@ fun VideoPlayerDialog(
                                             if (!isPlaying) {
                                                 scope.launch {
                                                     val bmp = withContext(Dispatchers.IO) { extractFrameAt(currentEntry, target, metadata, decodeSize) }
-                                                    if (bmp != null) currentFrameBitmap = bmp
+                                                    if (bmp != null) frames.publish(bmp) { currentFrameBitmap = it }
                                                 }
                                             }
                                         }
@@ -680,7 +695,7 @@ fun VideoPlayerDialog(
                                             if (!isPlaying) {
                                                 scope.launch {
                                                     val bmp = withContext(Dispatchers.IO) { extractFrameAt(currentEntry, target, metadata, decodeSize) }
-                                                    if (bmp != null) currentFrameBitmap = bmp
+                                                    if (bmp != null) frames.publish(bmp) { currentFrameBitmap = it }
                                                 }
                                             }
                                         }
@@ -781,7 +796,7 @@ private fun VideoPreviewCanvas(
             )
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator(
+                WexSpinner(
                     modifier = Modifier.size(36.dp),
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -822,7 +837,7 @@ private fun VideoPreviewCanvas(
                     .padding(16.dp)
                     .size(24.dp)
             ) {
-                CircularProgressIndicator(
+                WexSpinner(
                     strokeWidth = 2.dp,
                     color = MaterialTheme.colorScheme.primary
                 )

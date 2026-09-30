@@ -40,6 +40,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -117,8 +118,13 @@ fun DexEditorPlusDialog(
     val anyDirty = smaliController.isDirty || dexDirty
     TrackUnsaved("Dex Редактор+: $dexName", anyDirty)
 
+    // Движок закрывается, когда редактор уходит с экрана любым путём: раньше только через closeEditor(),
+    // и при закрытии главного окна с открытым редактором папки декомпиляторов оставались на диске
+    DisposableEffect(engine) {
+        onDispose { engine.close() }
+    }
+
     fun closeEditor() {
-        engine.close()
         onDismiss()
     }
 
@@ -145,9 +151,11 @@ fun DexEditorPlusDialog(
         scope.launch {
             val err = withContext(Dispatchers.IO) {
                 try {
+                    // Номер — до сборки списка: класс, собранный во время записи, останется несохранённым
+                    val version = engine.currentEditVersion
                     val modified = engine.modifiedDex()
                     BackgroundSave.tracked { writer(modified) }
-                    engine.markSaved()
+                    engine.markSaved(version)
                     null
                 } catch (e: Exception) {
                     e.message ?: e.javaClass.simpleName
@@ -155,7 +163,8 @@ fun DexEditorPlusDialog(
             }
             savingDex = false
             if (err == null) {
-                dexDirty = false
+                // Не просто false: пока писали, могли собрать ещё класс — он ждёт следующей записи
+                dexDirty = engine.hasUnsavedChanges
                 toast.success("DEX сохранён")
             } else {
                 toast.error("DEX не сохранён: $err")
@@ -193,12 +202,15 @@ fun DexEditorPlusDialog(
         flattenDexTree(rootPackageNode, expandedPackages)
     }
 
-    val searchResults = remember(searchQuery, searchMode) {
+    // Поиск — после паузы в наборе и в фоне: по методам, полям и строкам большого DEX это от 100 мс
+    // до секунды, и каждый символ замораживал окно. Пока ищется новое, видны прежние результаты
+    val searchResults by androidx.compose.runtime.produceState(emptyList<org.wexclient.app.dex.DexSearchResult>(), searchQuery, searchMode) {
         if (searchQuery.isBlank()) {
-            emptyList()
-        } else {
-            engine.search(searchQuery, searchMode)
+            value = emptyList()
+            return@produceState
         }
+        kotlinx.coroutines.delay(150)
+        value = withContext(Dispatchers.Default) { engine.search(searchQuery, searchMode) }
     }
 
     // Фоновый прогрев трансляции DEX -> jar, чтобы вкладки CFR/VF открывались без задержки
@@ -356,7 +368,7 @@ fun DexEditorPlusDialog(
                                 modifier = Modifier.height(34.dp)
                             ) {
                                 if (savingDex) {
-                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                                    WexSpinner(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                                 } else {
                                     Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
                                 }
@@ -722,7 +734,7 @@ fun DexEditorPlusDialog(
                     // Right: Code Editor View
                     Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                         if (isLoadingCode) {
-                            CircularProgressIndicator(
+                            WexSpinner(
                                 modifier = Modifier.align(Alignment.Center),
                                 color = NoctaliaPrimary
                             )

@@ -81,6 +81,8 @@ object WexWindows {
     @Synchronized
     fun close(window: ManagerWindow) {
         managers.remove(window)
+        // Окно закрылось, не забрав своё: id больше не повторится — иначе запись висела бы до выхода
+        pendingForManager.removeAll { it.managerId == window.id }
     }
 
     @Synchronized

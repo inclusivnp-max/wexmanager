@@ -247,7 +247,7 @@ fun TrashDialog(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
+                        if (busy) WexSpinner(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                         IconButton(onClick = onDismiss, enabled = !busy) {
                             Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = MaterialTheme.colorScheme.outline)
                         }
@@ -271,7 +271,7 @@ fun TrashDialog(
                     ) {
                         val list = items
                         when {
-                            list == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center), color = NoctaliaPrimary)
+                            list == null -> WexSpinner(modifier = Modifier.align(Alignment.Center), color = NoctaliaPrimary)
                             visible.isEmpty() -> Text(
                                 if (list.isEmpty()) "Корзина пуста" else "Ничего не найдено",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -23,6 +23,11 @@ object FileTree {
         try {
             Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
                 override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    // Junction Windows — тоже ссылка, хоть Java и считает его папкой
+                    if (attrs.isOther) {
+                        runCatching { removeOne(dir) }
+                        return FileVisitResult.SKIP_SUBTREE
+                    }
                     runCatching {
                         val perms = Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS)
                         if (PosixFilePermission.OWNER_WRITE !in perms || PosixFilePermission.OWNER_EXECUTE !in perms) {
@@ -33,7 +38,7 @@ object FileTree {
                 }
 
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    runCatching { Files.deleteIfExists(file) }
+                    runCatching { removeOne(file) }
                     return FileVisitResult.CONTINUE
                 }
 
@@ -53,4 +58,41 @@ object FileTree {
     }
 
     fun delete(root: File): Boolean = delete(root.toPath())
+
+    /**
+     * Удаление по команде пользователя на Windows: первая ошибка — исключением. Junction (точка
+     * повторной обработки) удаляется сам, без захода внутрь: Files.walk считает его папкой и стёр бы
+     * то, на что он указывает. «Только чтение» (.git/objects) перед удалением снимается.
+     */
+    @Throws(IOException::class)
+    fun deleteOrThrow(root: Path) {
+        Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (!attrs.isOther) return FileVisitResult.CONTINUE
+                removeOne(dir)
+                return FileVisitResult.SKIP_SUBTREE
+            }
+
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                removeOne(file)
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+                if (exc != null) throw exc
+                removeOne(dir)
+                return FileVisitResult.CONTINUE
+            }
+        })
+    }
+
+    /** Удалить один файл, папку или ссылку; на Windows файл «только чтение» — сняв этот флаг. */
+    private fun removeOne(p: Path) {
+        try {
+            Files.deleteIfExists(p)
+        } catch (e: java.nio.file.AccessDeniedException) {
+            if (runCatching { Files.setAttribute(p, "dos:readonly", false, LinkOption.NOFOLLOW_LINKS) }.isFailure) throw e
+            Files.deleteIfExists(p)
+        }
+    }
 }

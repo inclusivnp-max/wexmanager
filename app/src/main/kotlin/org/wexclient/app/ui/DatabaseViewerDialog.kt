@@ -183,7 +183,7 @@ fun DatabaseViewerDialog(entry: VfsEntry, vfsManager: VfsManager, onDismiss: () 
         when {
             openError != null -> GrailEmptyState("Не удалось открыть базу: $openError")
             current == null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = NoctaliaPrimary)
+                WexSpinner(color = NoctaliaPrimary)
             }
             else -> Row(modifier = Modifier.fillMaxSize()) {
                 ObjectList(
@@ -540,7 +540,7 @@ private fun TableView(
                                 modifier = Modifier.fillMaxWidth().padding(10.dp),
                                 horizontalArrangement = Arrangement.Center
                             ) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
+                                WexSpinner(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                             }
                         }
                     }
@@ -554,7 +554,7 @@ private fun TableView(
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     when {
                         loading || !finished || query != active ->
-                            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
+                            WexSpinner(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = NoctaliaPrimary)
                         query.isBlank() -> GrailEmptyState("Таблица пуста")
                         else -> GrailEmptyState("Ничего не найдено")
                     }

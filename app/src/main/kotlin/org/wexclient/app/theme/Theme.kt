@@ -9,6 +9,8 @@ import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.graphics.graphicsLayer
+import org.wexclient.app.ui.observeBackgroundTouches
 import androidx.compose.ui.unit.dp
 
 val NoctaliaShapes = Shapes(
@@ -72,17 +74,30 @@ fun NoctaliaTheme(backdrop: Boolean = true, content: @Composable () -> Unit) {
           androidx.compose.material3.LocalContentColor provides ThemePreferences.colorScheme.onSurface
       ) {
         if (backdrop) {
+            val shader = BackgroundPreferences.shader
+            val renderer = androidx.compose.runtime.remember { org.wexclient.app.ui.ShaderBackgroundRenderer() }
             androidx.compose.foundation.layout.Box(
                 modifier = androidx.compose.ui.Modifier.fillMaxSize()
+                    // Живой фон отзывается на нажатия в любом месте окна, ничего у окна не забирая
+                    .observeBackgroundTouches(renderer, shader.enabled && shader.touch)
             ) {
-                org.wexclient.app.ui.AppBackground()
+                org.wexclient.app.ui.AppBackground(renderer = renderer)
                 // Фон окна поверх картинки — у каждого окна одинаковый. Панели и диалоги кладут
                 // свой тон уже на него: иначе отдельные окна выходили светлее главного
                 androidx.compose.foundation.layout.Box(
                     modifier = androidx.compose.ui.Modifier.fillMaxSize()
                         .background(ThemePreferences.colorScheme.background)
                 )
-                content()
+                // Содержимое окна — своим слоем. В Compose Desktop всё, что не в слое, рисуется заново
+                // в каждом кадре окна: от живого фона, снега или мигания курсора заново рисовались
+                // обе панели со всеми строками. Со слоем их нарисованная картинка переиспользуется
+                androidx.compose.foundation.layout.Box(
+                    modifier = androidx.compose.ui.Modifier.fillMaxSize().graphicsLayer()
+                ) {
+                    content()
+                }
+                // Свечение за курсором — поверх содержимого: под полупрозрачными панелями его не было видно
+                if (shader.enabled && shader.touch) org.wexclient.app.ui.ShaderTouchOverlay(renderer)
             }
         } else {
             content()

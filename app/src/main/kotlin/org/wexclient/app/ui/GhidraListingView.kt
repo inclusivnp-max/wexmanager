@@ -286,7 +286,7 @@ fun GhidraListingView(
                     }
                     if (showXrefs) {
                         if (xrefs == null) {
-                            CircularProgressIndicator(
+                            WexSpinner(
                                 modifier = Modifier.size(14.dp),
                                 strokeWidth = 2.dp,
                                 color = NoctaliaPrimary

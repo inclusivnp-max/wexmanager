@@ -74,15 +74,32 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Последний поиск: окно для тех же папок открывается сразу с результатом. */
 object DuplicatesSession {
+    @Volatile
     var last: DupResult? = null
         private set
     var options: DupOptions = DupOptions(minSize = 1)
     var at: Long = 0L
         private set
+    private var expiry: kotlinx.coroutines.Job? = null
 
     fun remember(result: DupResult) {
         last = result
-        at = System.currentTimeMillis()
+        val stamp = System.currentTimeMillis()
+        at = stamp
+        // Список копий по большому диску — десятки мегабайт; держался до закрытия всех окон
+        expiry?.cancel()
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        expiry = kotlinx.coroutines.GlobalScope.launch {
+            kotlinx.coroutines.delay(KEEP_MS)
+            if (at == stamp) last = null
+        }
+    }
+
+    private const val KEEP_MS = 10 * 60_000L
+
+    /** Окон не осталось — список копий больше некому показать. */
+    fun forget() {
+        last = null
     }
 
     /** Ушедшее в корзину — из сохранённого результата: при следующем открытии его уже не показывать. */
@@ -417,7 +434,7 @@ private fun SearchProgress(p: DupProgress, onStop: () -> Unit) {
         ) {
             val fraction = if (p.bytesTotal > 0) (p.bytesDone.toDouble() / p.bytesTotal).toFloat().coerceIn(0f, 1f) else null
             if (fraction == null) {
-                CircularProgressIndicator(color = NoctaliaPrimary, strokeWidth = 2.5.dp, modifier = Modifier.size(28.dp))
+                WexSpinner(color = NoctaliaPrimary, strokeWidth = 2.5.dp, modifier = Modifier.size(28.dp))
             }
             Spacer(modifier = Modifier.height(12.dp))
             Text(

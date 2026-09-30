@@ -61,6 +61,7 @@ import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -77,9 +78,11 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import org.wexclient.app.util.frozen
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -96,6 +99,7 @@ import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.rememberDialogState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.wexclient.app.theme.NoctaliaPrimary
@@ -181,7 +185,10 @@ fun ImageViewerDialog(
                 return@LaunchedEffect
             }
 
-            val view = withContext(Dispatchers.IO) { decodeForView(bytes) }
+            val view = withContext(Dispatchers.IO) {
+                // Ушли к другой картинке, пока эта декодировалась, — её пиксели (до 256 МБ вне кучи) сразу отдаём
+                decodeForView(bytes)?.also { v -> if (!isActive) v.bitmap.asSkiaBitmap().close() }
+            }
             if (view == null) {
                 loadError = "Не удалось загрузить изображение: формат не распознан"
             } else {
@@ -198,6 +205,14 @@ fun ImageViewerDialog(
         } finally {
             isLoading = false
         }
+    }
+
+    // Показанную картинку закрываем, как только её сменили или окно закрыли: до 64 Мп — это до 256 МБ
+    // нативной памяти, а сборщик мусора о ней не знает. Уже записанный кадр не пострадает — SkImage
+    // держит пиксели своей ссылкой
+    DisposableEffect(loadedBitmap) {
+        val shown = loadedBitmap
+        onDispose { shown?.asSkiaBitmap()?.close() }
     }
 
     // Slideshow timer
@@ -390,7 +405,7 @@ fun ImageViewerDialog(
                                 when {
                                     isLoading -> {
                                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                            WexSpinner(color = MaterialTheme.colorScheme.primary)
                                             Spacer(modifier = Modifier.height(8.dp))
                                             Text("Загрузка...", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                                         }
@@ -780,7 +795,7 @@ internal fun decodeForView(bytes: ByteArray): ViewImage? {
                 val param = reader.defaultReadParam
                 if (step > 1) param.setSourceSubsampling(step, step, 0, 0)
                 val image = reader.read(0, param)
-                return ViewImage(image.toComposeImageBitmap(), w, h, step > 1)
+                return ViewImage(image.toComposeImageBitmap().frozen(), w, h, step > 1)
             } catch (_: javax.imageio.IIOException) {
                 // Формат узнан, но прочитать не вышло — попробует Skia
             } finally {
@@ -801,7 +816,7 @@ internal fun decodeForView(bytes: ByteArray): ViewImage? {
         val pixels = w.toLong() * h
         // Skia уменьшает, только расшифровав картинку целиком: больше 16384² не берёмся
         if (pixels > 16384L * 16384L) return null
-        if (pixels <= MAX_VIEW_PIXELS) return ViewImage(it.toComposeImageBitmap(), w, h, false)
+        if (pixels <= MAX_VIEW_PIXELS) return ViewImage(it.toComposeImageBitmap().frozen(), w, h, false)
         val maxPx = (maxOf(w, h) * kotlin.math.sqrt(MAX_VIEW_PIXELS.toDouble() / pixels)).toInt()
         val scaled = org.wexclient.app.util.ImageScale.decodeScaled(bytes, maxPx, maxSourcePx = Int.MAX_VALUE) ?: return null
         return ViewImage(scaled, w, h, true)

@@ -91,17 +91,36 @@ fun FileViewerDialog(
     // сохраняем только по повторному Ctrl+S
     val lossy = decoded?.hadMalformedInput == true
     var lossyConfirmed by remember(entry.path) { mutableStateOf(false) }
+    // Файл на диске (не внутри архива) могут поменять другой программой, пока он открыт здесь
+    val disk = remember(entry.path) {
+        entry.path.takeIf { it.fileSystem == FileSystems.getDefault() }?.let { DiskWatch(it) }
+    }
+    var overwriteConfirmed by remember(entry.path) { mutableStateOf(false) }
+    /** Новые байты файла, изменённого снаружи, пока здесь есть несохранённые правки. */
+    var externalChange by remember(entry.path) { mutableStateOf<ByteArray?>(null) }
     val saveBytes: ((String) -> Unit)? = onSave?.let { write ->
         { text: String ->
             if (lossy && !lossyConfirmed) {
                 lossyConfirmed = true
                 throw IllegalStateException("В файле есть байты не в кодировке ${controller.charset?.name() ?: "UTF-8"} — они заменятся на «�». Сохраните ещё раз, если согласны")
             }
+            // Файл поменяли снаружи (git, другой редактор) — молча его не затираем
+            if (disk != null && !overwriteConfirmed) {
+                val known = controller.originalBytes
+                val onDisk = disk.read()
+                if (known != null && onDisk != null && !onDisk.contentEquals(known)) {
+                    overwriteConfirmed = true
+                    throw IllegalStateException("Файл изменён на диске другой программой. Сохраните ещё раз, чтобы записать поверх")
+                }
+            }
             val cs = controller.charset ?: Charsets.UTF_8
             val bytes = TextCodec.encode(text, TextFileFormat(cs, controller.hasBom, LineSeparator.LF))
             write(bytes)
             // «Открыть заново в кодировке» после сохранения — от сохранённого, а не от старого
             controller.originalBytes = bytes
+            overwriteConfirmed = false
+            externalChange = null
+            disk?.remember()
         }
     }
     val saver = rememberBackgroundSave()
@@ -116,10 +135,25 @@ fun FileViewerDialog(
     val hasPreview = isMarkdown || isHtml
     // К найденной строке — в редакторе, даже у Markdown
     var previewTab by remember(entry.path) { mutableStateOf(if (initialTarget != null) 1 else lastPreviewTab) }
+    // Файл на диске открывается там, где его в прошлый раз закрыли (если не просили другую строку)
+    val rememberedAt = remember(entry.path) { entry.path.takeIf { it.fileSystem == FileSystems.getDefault() } }
     LaunchedEffect(controller, initialTarget) {
-        val target = initialTarget ?: return@LaunchedEffect
+        val target = initialTarget
+        if (target == null) {
+            rememberedAt?.let { org.wexclient.app.editor.EditorPositions.get(it) }?.let { controller.goTo(it) }
+            return@LaunchedEffect
+        }
         if (hasPreview) previewTab = 1
         controller.goTo(target)
+    }
+    androidx.compose.runtime.DisposableEffect(controller) {
+        onDispose {
+            val path = rememberedAt ?: return@onDispose
+            val snap = controller.snapshot
+            val caret = controller.value.selection.end.coerceIn(0, snap.text.length)
+            val line = snap.lineOf(caret)
+            org.wexclient.app.editor.EditorPositions.put(path, line, caret - snap.lineStart(line))
+        }
     }
     val toast = rememberToastState()
     var reloadKey by remember(entry.path) { mutableStateOf(0) }
@@ -158,6 +192,23 @@ fun FileViewerDialog(
         // Отдельное окно редактора иначе показывает в панели задач кофейный логотип Java
         androidx.compose.runtime.LaunchedEffect(window) {
             org.wexclient.app.util.WindowIcon.applyTo(window)
+        }
+        // Вернулись в окно — не поменяли ли файл снаружи. Без правок просто перечитываем его,
+        // с правками спрашиваем. Байты читаем, только если сменились время или размер файла
+        val focused = androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+        LaunchedEffect(focused, disk) {
+            if (!focused || disk == null) return@LaunchedEffect
+            val known = controller.originalBytes ?: return@LaunchedEffect
+            val onDisk = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                if (disk.changed()) disk.read().also { disk.remember() } else null
+            } ?: return@LaunchedEffect
+            if (onDisk.contentEquals(known) || saver.busy) return@LaunchedEffect
+            if (!controller.isDirty) {
+                controller.reloadFromDisk(onDisk)
+                toast.info("Файл изменён на диске — перечитан")
+            } else {
+                externalChange = onDisk
+            }
         }
         org.wexclient.app.theme.NoctaliaTheme {
             Surface(
@@ -208,7 +259,7 @@ fun FileViewerDialog(
                             IconButton(onClick = {
                                 // Настоящий вид со стилями и скриптами — дело браузера
                                 runCatching {
-                                    ProcessBuilder("xdg-open", entry.path.toAbsolutePath().toString())
+                                    ProcessBuilder(org.wexclient.app.util.systemOpenCommand(entry.path.toAbsolutePath().toString()))
                                         .withUserEnv().start()
                                 }.onFailure { toast.error("Не удалось открыть браузер") }
                             }) {
@@ -232,6 +283,21 @@ fun FileViewerDialog(
                             Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = MaterialTheme.colorScheme.outline)
                         }
                     }
+                }
+
+                externalChange?.let { changed ->
+                    ExternalChangeBar(
+                        onReload = {
+                            controller.reloadFromDisk(changed)
+                            externalChange = null
+                            overwriteConfirmed = false
+                        },
+                        onKeepMine = {
+                            // Свои правки важнее: следующее сохранение запишет их без вопроса
+                            controller.originalBytes = changed
+                            externalChange = null
+                        }
+                    )
                 }
 
                 if (hasPreview) {
@@ -316,6 +382,50 @@ fun FileViewerDialog(
         }
     }
 }
+}
+
+/**
+ * Отметка файла на диске: время изменения и размер на момент, когда мы его последний раз читали
+ * или писали. По ней видно, что файл трогал кто-то ещё, не читая его целиком.
+ */
+private class DiskWatch(private val path: java.nio.file.Path) {
+    @Volatile
+    private var stamp: Pair<Long, Long>? = current()
+
+    private fun current(): Pair<Long, Long>? = runCatching {
+        val attrs = java.nio.file.Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes::class.java)
+        attrs.lastModifiedTime().toMillis() to attrs.size()
+    }.getOrNull()
+
+    fun changed(): Boolean = current().let { it != null && it != stamp }
+
+    fun remember() {
+        stamp = current()
+    }
+
+    fun read(): ByteArray? = runCatching { java.nio.file.Files.readAllBytes(path) }.getOrNull()
+}
+
+/** Полоса над редактором: файл поменяли снаружи, а здесь есть несохранённые правки. */
+@Composable
+private fun ExternalChangeBar(onReload: () -> Unit, onKeepMine: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+        ) {
+            Text(
+                "Файл изменён на диске другой программой, а здесь есть несохранённые правки",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            org.wexclient.app.editor.SmallButton("Перечитать с диска", onClick = onReload)
+            Spacer(modifier = Modifier.width(6.dp))
+            org.wexclient.app.editor.SmallButton("Оставить мои правки", onClick = onKeepMine)
+        }
+    }
 }
 
 // Последняя вкладка просмотра — для следующего файла (по умолчанию просмотр)

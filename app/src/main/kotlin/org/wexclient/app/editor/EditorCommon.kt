@@ -44,6 +44,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
@@ -73,6 +74,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asComposeImageBitmap
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -95,6 +97,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.drawText
@@ -146,6 +149,8 @@ internal class EditorColors(
     val occurrence: Color,
     val searchMatch: Color,
     val searchCurrent: Color,
+    /** Область «в выделении» при поиске. */
+    val searchScope: Color,
     val bracket: Color,
     val indentGuide: Color,
     val indentGuideActive: Color,
@@ -177,6 +182,7 @@ internal fun rememberEditorColors(): EditorColors {
             occurrence = cs.onSurface.copy(alpha = 0.12f),
             searchMatch = tertiary.copy(alpha = 0.30f),
             searchCurrent = tertiary.copy(alpha = 0.65f),
+            searchScope = tertiary.copy(alpha = 0.08f),
             bracket = primary.copy(alpha = 0.55f),
             indentGuide = cs.onSurface.copy(alpha = 0.07f),
             indentGuideActive = cs.onSurface.copy(alpha = 0.22f),
@@ -203,8 +209,8 @@ internal fun rememberTokenStyles(): Array<SpanStyle?> {
     return remember(p, t, s) { Array(Tok.values().size) { SyntaxColors.style(Tok.values()[it]) } }
 }
 
-/** Текст длиннее — подсвечивается только окно строк вокруг видимой части. */
-internal class SearchHighlight(val matches: SearchMatches, val current: Int)
+/** Найденное для отрисовки: совпадения, текущее и область «в выделении» (если поиск в ней). */
+internal class SearchHighlight(val matches: SearchMatches, val current: Int, val scope: TextRange? = null)
 
 /** Позиция всплывающего окна у курсора: снизу, а если не влезает — сверху. */
 internal class CaretPopupPosition(private val caret: Rect, private val gapPx: Int) : PopupPositionProvider {
@@ -351,7 +357,10 @@ internal fun KindBadge(kind: ItemKind) {
     }
 }
 
-private class MinimapImage(val bitmap: ImageBitmap, val lines: Int, val rowPx: Float, val version: Long)
+private class MinimapImage(val bitmap: ImageBitmap, val lines: Int, val rowPx: Float, val version: Long) {
+    /** Пиксели лежат в нативной памяти Skia: сборщик мусора её не видит и освобождает поздно. */
+    fun close() = bitmap.asSkiaBitmap().close()
+}
 
 @Composable
 internal fun Minimap(
@@ -367,6 +376,18 @@ internal fun Minimap(
 ) {
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var image by remember { mutableStateOf<MinimapImage?>(null) }
+    // Снятая с показа картинка. Закрываем её только при следующей замене: к тому времени кадры
+    // рисуют уже новую, а раньше каждая правка оставляла по растру в нативной памяти
+    val retired = remember { arrayOfNulls<MinimapImage>(1) }
+    DisposableEffect(Unit) {
+        onDispose {
+            retired[0]?.close()
+            retired[0] = null
+            image?.close()
+        }
+    }
+    // Обработчики мыши ниже запускаются один раз: высоту окна берём свежую, а не с первого показа
+    val currentViewportH by androidx.compose.runtime.rememberUpdatedState(viewportH)
     val version = ctrl.version
     val tokenColors = remember(colors, NoctaliaPrimary, NoctaliaTertiary) {
         IntArray(Tok.values().size) { SyntaxColors.color(Tok.values()[it], colors.text).copy(alpha = 0.85f).toArgbInt() }
@@ -377,6 +398,8 @@ internal fun Minimap(
         delay(if (image == null) 0 else 250)
         val snap = ctrl.snapshot
         val img = withContext(Dispatchers.Default) { renderMinimap(snap, boxSize.width - 12, boxSize.height, tokenColors, plain) }
+        retired[0]?.close()
+        retired[0] = image
         image = img
     }
     Box(
@@ -389,7 +412,7 @@ internal fun Minimap(
                     val contentH = contentH()
                     val mapH = min(boxSize.height.toFloat(), img.lines * img.rowPx).coerceAtLeast(1f)
                     val frac = (y / mapH).coerceIn(0f, 1f)
-                    onJump((frac * contentH - viewportH / 2f).roundToInt())
+                    onJump((frac * contentH - currentViewportH / 2f).roundToInt())
                 }
                 detectTapGestures { jump(it.y) }
             }
@@ -399,7 +422,7 @@ internal fun Minimap(
                     val contentH = contentH()
                     val mapH = min(boxSize.height.toFloat(), img.lines * img.rowPx).coerceAtLeast(1f)
                     val frac = (change.position.y / mapH).coerceIn(0f, 1f)
-                    onJump((frac * contentH - viewportH / 2f).roundToInt())
+                    onJump((frac * contentH - currentViewportH / 2f).roundToInt())
                 }
             }
             .drawWithContent {
@@ -500,6 +523,7 @@ private fun renderMinimap(snap: HighlightSnapshot, width: Int, height: Int, toke
     bmp.allocPixels(info)
     bmp.installPixels(info, bytes, width * 4)
     // Растягиваем строки в 2 пикселя, если их мало
+    bmp.setImmutable() // см. util/ImageScale.kt: frozen
     return MinimapImage(bmp.asComposeImageBitmap(), lines, if (rowPx >= 2f) 1f else rowPx, snap.version).let {
         MinimapImage(it.bitmap, lines, rows.toFloat() / lines, snap.version)
     }

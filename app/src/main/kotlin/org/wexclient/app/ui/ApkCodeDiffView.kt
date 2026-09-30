@@ -542,7 +542,7 @@ private fun SmaliDiffPane(
 
             when {
                 data == null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = NoctaliaPrimary)
+                    WexSpinner(color = NoctaliaPrimary)
                 }
                 data.error != null -> GrailEmptyState(data.error!!)
                 rows.isEmpty() -> GrailEmptyState("Различий в коде класса нет — изменились только объявления")

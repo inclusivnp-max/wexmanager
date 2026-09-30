@@ -17,6 +17,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import org.wexclient.app.util.frozen
 import org.wexclient.app.util.startHelper
 
 /**
@@ -178,8 +179,24 @@ class BrowserSession private constructor(
         fun findBrowser(): String? = foundBrowser
 
         private val foundBrowser: String? by lazy {
+            if (java.io.File.separatorChar == '\\') return@lazy windowsBrowser()
             val dirs = (System.getenv("PATH") ?: "/usr/local/bin:/usr/bin:/bin").split(':').filter { it.isNotBlank() }
             BROWSERS.firstOrNull { name -> dirs.any { dir -> java.io.File(dir, name).let { it.isFile && it.canExecute() } } }
+        }
+
+        /** Windows: Chromium-браузеры не в PATH, а в Program Files / AppData; Edge есть всегда. */
+        private fun windowsBrowser(): String? {
+            val roots = listOfNotNull(
+                System.getenv("ProgramFiles"), System.getenv("ProgramFiles(x86)"), System.getenv("LOCALAPPDATA")
+            )
+            val rel = listOf(
+                "Google\\Chrome\\Application\\chrome.exe",
+                "Chromium\\Application\\chrome.exe",
+                "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+                "Microsoft\\Edge\\Application\\msedge.exe"
+            )
+            return rel.asSequence().flatMap { r -> roots.asSequence().map { java.io.File(it, r) } }
+                .firstOrNull { it.isFile }?.absolutePath
         }
 
         /**
@@ -303,11 +320,14 @@ class BrowserSession private constructor(
             throw java.io.IOException("Страница в браузере не открылась (${last?.take(120)})")
         }
 
-        /** Разделяемый разбор кадров: JPEG из браузера в картинку Compose. */
+        /**
+         * Разделяемый разбор кадров: JPEG из браузера в картинку Compose. Картинка — нативная память,
+         * закрывает её показавший (BrowserView через FrameHandoff), а не сборщик мусора.
+         */
         fun decodeFrame(bytes: ByteArray): androidx.compose.ui.graphics.ImageBitmap? = runCatching {
             val image = org.jetbrains.skia.Image.makeFromEncoded(bytes)
             try {
-                image.toComposeImageBitmap()
+                image.toComposeImageBitmap().frozen()
             } finally {
                 image.close()
             }

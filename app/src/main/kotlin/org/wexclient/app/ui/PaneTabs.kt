@@ -164,8 +164,17 @@ class PaneTabs(
         if (side.isBlank()) return emptyList()
         val props = readProps()
         val raw = props.getProperty("$side.tabs")?.split("\n")?.filter { it.isNotBlank() } ?: return emptyList()
-        val paths = raw.mapNotNull { text ->
-            runCatching { Path.of(text) }.getOrNull()?.takeIf { java.nio.file.Files.isDirectory(it) }
+        // Проверка папок — параллельно и с пределом: stat папки на отвалившемся сетевом диске висит без конца,
+        // а зовётся это при старте из потока окна. Не ответила — вкладку оставляем, ошибку покажет чтение
+        val checks = raw.mapNotNull { text -> runCatching { Path.of(text) }.getOrNull() }.map { path ->
+            path to java.util.concurrent.CompletableFuture.supplyAsync({ java.nio.file.Files.isDirectory(path) }, probes)
+        }
+        val deadline = System.nanoTime() + PROBE_BUDGET_NS
+        val paths = checks.mapNotNull { (path, check) ->
+            val left = (deadline - System.nanoTime()).coerceAtLeast(0)
+            val isDir = runCatching { check.get(left, java.util.concurrent.TimeUnit.NANOSECONDS) }
+                .getOrElse { it is java.util.concurrent.TimeoutException }
+            path.takeIf { isDir }
         }
         if (paths.isEmpty()) return emptyList()
         index = props.getProperty("$side.index")?.toIntOrNull()?.coerceIn(0, paths.size - 1) ?: 0
@@ -187,5 +196,13 @@ class PaneTabs(
     private companion object {
         val configDir = File(System.getProperty("user.home"), ".config/wexdesktop")
         val configFile = File(configDir, "tabs.properties")
+
+        /** Сколько всего ждём проверки сохранённых вкладок при старте. */
+        const val PROBE_BUDGET_NS = 400_000_000L
+
+        /** Потоки проверки — фоновые: зависший stat не держит выход из программы. */
+        val probes: java.util.concurrent.ExecutorService by lazy {
+            java.util.concurrent.Executors.newCachedThreadPool { r -> Thread(r, "wex-tab-probe").apply { isDaemon = true } }
+        }
     }
 }

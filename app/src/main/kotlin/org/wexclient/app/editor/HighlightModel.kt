@@ -32,9 +32,20 @@ class HighlightSnapshot(
     private val starts: IntArray,
     val lineCount: Int,
     private val tokens: Array<IntArray?>,
-    val version: Long
+    val version: Long,
+    /** Состояние лексера в конце каждой строки: не 0 — строка ушла дальше незакрытой (строка, комментарий…). */
+    private val endStates: IntArray? = null,
+    /** Текст разобран лексером (слишком большой только разбит на строки — токенов нет). */
+    val lexed: Boolean = true
 ) : SyntaxInfo {
     fun lineStart(line: Int): Int = starts[line]
+
+    /**
+     * Состояние лексера в конце строки [line]. Сам по себе номер значит своё у каждого лексера, но
+     * 0 у всех — «ничего не тянется на следующую строку»: однострочный комментарий кончился,
+     * строковый литерал закрыт.
+     */
+    fun endState(line: Int): Int = endStates?.getOrNull(line) ?: 0
     fun lineEnd(line: Int): Int = if (line + 1 < lineCount) starts[line + 1] - 1 else text.length
 
     fun lineOf(offset: Int): Int {
@@ -204,6 +215,10 @@ class HighlightModel(language: Language) {
     /** Полный разбор текста лексером языка. */
     private fun lexAll() {
         lexed = true
+        // Свежие массивы: снимок «только строки» уже отдан наружу и должен остаться неизменным
+        inStates = IntArray(count)
+        outStates = IntArray(count)
+        tokens = arrayOfNulls(count)
         if (text.length <= maxLexChars) {
             var state = 0
             for (line in 0 until count) {
@@ -291,7 +306,7 @@ class HighlightModel(language: Language) {
 
     private fun publish() {
         version++
-        snapshot = HighlightSnapshot(text, language, starts, count, tokens, version)
+        snapshot = HighlightSnapshot(text, language, starts, count, tokens, version, outStates, lexed && text.length <= maxLexChars)
     }
 
     private fun lex(line: Int, state: Int): Int {
@@ -306,6 +321,11 @@ class HighlightModel(language: Language) {
         val end = try {
             language.lexer.tokenize(str, state, scratch)
         } catch (_: Exception) {
+            scratch.clear()
+            0
+        } catch (_: StackOverflowError) {
+            // Регулярное выражение лексера на очень длинной строке: строка останется без подсветки,
+            // а не уронит окно
             scratch.clear()
             0
         }

@@ -21,6 +21,11 @@ object BookmarksManager {
     private const val HEADER_V2_PREFIX = "# WEX Desktop places v2"
 
     private val home: String get() = System.getProperty("user.home")
+    private val isWindows = File.separatorChar == '\\'
+
+    /** Windows: C:\, D:\… — список букв без обращения к самим дискам (сетевой не вешает поток). */
+    private fun windowsDrives(): List<String> = File.listRoots().map { it.path }
+
     private val configDir: File get() = File(home, ".config/wexdesktop")
     private val placesFile: File get() = File(configDir, "places.tsv")
     private val legacyFile: File get() = File(configDir, "bookmarks.tsv")
@@ -36,7 +41,11 @@ object BookmarksManager {
     fun getQuickLocations(): List<BookmarkItem> {
         val list = mutableListOf<BookmarkItem>()
         list.add(BookmarkItem("Дом (~)", home, isSystem = true, icon = SymbolRef.parse("HOME")))
-        list.add(BookmarkItem("Корень (/)", "/", isSystem = true, icon = SymbolRef.parse("ROOT")))
+        if (isWindows) {
+            windowsDrives().forEach { list.add(BookmarkItem("Диск ${it.trimEnd('\\')}", it, isSystem = true, icon = SymbolRef.parse("DRIVE"))) }
+        } else {
+            list.add(BookmarkItem("Корень (/)", "/", isSystem = true, icon = SymbolRef.parse("ROOT")))
+        }
 
         xdgDir("DOWNLOAD")?.let { list.add(BookmarkItem("Загрузки", it, isSystem = true, icon = SymbolRef.parse("DOWNLOADS"))) }
         xdgDir("DOCUMENTS")?.let { list.add(BookmarkItem("Документы", it, isSystem = true, icon = SymbolRef("description", codepoint = 0xe873))) }
@@ -130,10 +139,9 @@ object BookmarksManager {
     private fun normalize(path: Path): String = path.toAbsolutePath().normalize().toString()
 
     fun defaults(): List<BookmarkItem> {
-        val list = mutableListOf(
-            BookmarkItem("Домой", home, icon = SymbolRef.parse("HOME")),
-            BookmarkItem("Корень", "/", icon = SymbolRef.parse("ROOT"))
-        )
+        val list = mutableListOf(BookmarkItem("Домой", home, icon = SymbolRef.parse("HOME")))
+        if (isWindows) windowsDrives().forEach { list.add(BookmarkItem(it.trimEnd('\\'), it, icon = SymbolRef.parse("DRIVE"))) }
+        else list.add(BookmarkItem("Корень", "/", icon = SymbolRef.parse("ROOT")))
         xdgDir("DOWNLOAD")?.let { list.add(BookmarkItem("Загрузки", it, icon = SymbolRef.parse("DOWNLOADS"))) }
         xdgDir("DESKTOP")?.let { list.add(BookmarkItem("Стол", it, icon = SymbolRef.parse("DESKTOP"))) }
         listOf("IdeaProjects", "Проекты", "Projects", "AndroidStudioProjects")

@@ -14,9 +14,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoFixHigh
-import androidx.compose.material.icons.filled.Comment
+import androidx.compose.material.icons.automirrored.filled.Comment
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ContentPaste
@@ -50,7 +52,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -136,7 +137,6 @@ fun CodeEditorView(
     val surface = rememberFastSurfaceState(ctrl)
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val density = LocalDensity.current
     val prefs = EditorPreferences
     val fontSizeSp = prefs.fontSizeSp
     val tabSize = prefs.tabSize
@@ -222,6 +222,9 @@ fun CodeEditorView(
         toast.info(target.message)
     }
 
+    /** Где искать: область «в выделении», если она включена. */
+    fun searchWithin(): IntRange? = if (find.inSelection) ctrl.searchScope?.let { it.min until it.max } else null
+
     fun selectMatch(i: Int) {
         val m = matches
         if (i !in 0 until m.count) return
@@ -262,7 +265,8 @@ fun CodeEditorView(
         ctrl.applyEdit(TextFieldValue(newText, TextRange(after)))
         // Следующее совпадение ищется после пересчёта
         scope.launch {
-            val next = withContext(Dispatchers.Default) { SearchEngine.findAll(newText, find.options) }
+            val within = searchWithin()
+            val next = withContext(Dispatchers.Default) { SearchEngine.findAll(newText, find.options, within = within) }
             matches = next
             if (next.count > 0) {
                 val i = next.indexAtOrAfter(after)
@@ -277,11 +281,12 @@ fun CodeEditorView(
         val text = ctrl.value.text
         val options = find.options
         val replacement = find.replacement
+        val within = searchWithin()
         replacing = true
         // В фоне и со сроком: сложное выражение не вешает окно, ошибка переполнения стека не роняет его
         scope.launch {
             val result = withContext(Dispatchers.Default) {
-                runCatching { SearchEngine.replaceAll(text, options, replacement) }
+                runCatching { SearchEngine.replaceAll(text, options, replacement, within = within) }
             }
             replacing = false
             if (ctrl.value.text != text) {
@@ -306,7 +311,13 @@ fun CodeEditorView(
         if (!sel.collapsed) {
             val s = ctrl.value.text.substring(sel.min, sel.max)
             if (!s.contains('\n') && s.length <= 500) find.query = s
+            // Выделено несколько строк — ищем в них: искать такой кусок целиком незачем
+            else if (s.contains('\n')) {
+                ctrl.searchScope = TextRange(sel.min, sel.max)
+                find.inSelection = true
+            }
         }
+        ctrl.clearExtraCarets()
         findAnchor = sel.min
         find.visible = true
         if (replace && !effectiveReadOnly) find.replaceVisible = true
@@ -315,18 +326,87 @@ fun CodeEditorView(
         }
     }
 
+    /** «В выделении»: область — текущее выделение; без него — прежняя область, если была. */
+    fun toggleFindInSelection() {
+        if (find.inSelection) {
+            find.inSelection = false
+            return
+        }
+        val sel = ctrl.value.selection
+        if (!sel.collapsed) ctrl.searchScope = TextRange(sel.min, sel.max)
+        if (ctrl.searchScope == null) {
+            toast.info("Сначала выделите, где искать")
+            return
+        }
+        find.inSelection = true
+    }
+
+    /** Каретки на все найденные совпадения (Alt+Enter в строке поиска). */
+    fun selectAllMatches() {
+        val m = matches
+        if (m.count == 0) return
+        val ranges = (0 until minOf(m.count, MAX_CARETS)).map { TextRange(m.start(it), m.end(it)) }
+        ctrl.setCarets(ranges, ranges.getOrNull(currentMatch) ?: ranges.first())
+        if (m.count > 1) toast.info("Кареток: ${ranges.size} — Esc оставит одну")
+        focusEditor()
+    }
+
     fun transform(fn: (String) -> String) {
         if (effectiveReadOnly) return
         try {
-            edit(TextOps.transformSelection(ctrl.value, ctrl.language::isWordChar, fn))
+            if (ctrl.hasMultipleCarets) {
+                // В каждой каретке — её выделение или слово под ней
+                ctrl.editCarets(EditKind.OTHER) { text, sel ->
+                    val range = if (sel.collapsed) TextOps.wordRangeAt(text, sel.start, ctrl.language::isWordChar)
+                        ?.let { TextRange(it.first, it.last + 1) } ?: return@editCarets null
+                    else sel
+                    val out = fn(text.substring(range.min, range.max))
+                    CaretEdit(range.min, range.max, out, 0, out.length)
+                }
+            } else {
+                edit(TextOps.transformSelection(ctrl.value, ctrl.language::isWordChar, fn))
+            }
         } catch (e: Exception) {
             toast.error("Не удалось преобразовать: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 
+    /** Клавиши каретки: добавить выше или ниже — по раскладке поверхности (перенос, табы). */
+    fun addCaretVertically(down: Boolean) {
+        val lay = surface.layout ?: return
+        ctrl.addCaretVertically(down, lay::rowAndColumn, lay::offsetAt, lay.totalRows)
+    }
+
     fun perform(action: EditorAction) {
-        val v = ctrl.value
         val ro = effectiveReadOnly
+        if (ctrl.hasMultipleCarets) {
+            when (action) {
+                EditorAction.Undo, EditorAction.Redo -> Unit
+                EditorAction.Duplicate -> {
+                    if (!ro) ctrl.editCarets(EditKind.OTHER) { text, sel -> CaretOps.duplicate(text, sel) }
+                    return
+                }
+                EditorAction.DeleteLine -> {
+                    if (!ro) ctrl.deleteLinesAtCarets()
+                    return
+                }
+                EditorAction.LineComment -> {
+                    if (!ro && ctrl.toggleCommentAtCarets()) return
+                    ctrl.clearExtraCarets()
+                }
+                EditorAction.ToggleCase -> {
+                    transform { if (it.any(Char::isLowerCase)) it.uppercase() else it.lowercase() }
+                    return
+                }
+                EditorAction.Camel, EditorAction.Pascal, EditorAction.Snake, EditorAction.Screaming, EditorAction.Kebab,
+                EditorAction.Base64Encode, EditorAction.Base64Decode, EditorAction.UrlEncode, EditorAction.UrlDecode,
+                EditorAction.HexEncode, EditorAction.HexDecode, EditorAction.Escape, EditorAction.Unescape,
+                EditorAction.UnicodeUnescape -> Unit
+                // Остальное — команды одной каретки: работают от основной
+                else -> ctrl.clearExtraCarets()
+            }
+        }
+        val v = ctrl.value
         when (action) {
             EditorAction.Undo -> if (!ro) ctrl.undo()
             EditorAction.Redo -> if (!ro) ctrl.redo()
@@ -391,7 +471,121 @@ fun CodeEditorView(
             EditorAction.UnicodeUnescape -> transform { s ->
                 Regex("\\\\u([0-9a-fA-F]{4})").replace(s) { m -> m.groupValues[1].toInt(16).toChar().toString() }
             }
+            EditorAction.NextOccurrence -> if (!ctrl.selectNextOccurrence()) toast.info("Других вхождений нет")
+            EditorAction.AllOccurrences -> ctrl.selectAllOccurrences().let { n ->
+                if (n == 0) toast.info("Под кареткой нет слова") else if (n > 1) toast.info("Кареток: $n — Esc оставит одну")
+            }
+            EditorAction.CaretAbove -> addCaretVertically(false)
+            EditorAction.CaretBelow -> addCaretVertically(true)
+            EditorAction.CaretsLineEnds -> if (!ctrl.caretsAtLineEnds()) toast.info("Выделите несколько строк")
         }
+    }
+
+    /** Колонки кареток для ↑/↓ и каретки, для которых они посчитаны. */
+    val caretGoals = remember(ctrl) { arrayOfNulls<Pair<List<TextRange>, IntArray>>(1) }
+
+    /**
+     * Клавиши при нескольких каретках: правка и движение в каждой. false — сочетание не для них
+     * (сохранение, поиск, отмена…): его обработают как обычно.
+     */
+    fun handleCaretsKey(e: KeyEvent): Boolean {
+        val key = e.key
+        val ctrlKey = e.isCtrlPressed || e.isMetaPressed
+        val shift = e.isShiftPressed
+        val alt = e.isAltPressed
+        val ro = effectiveReadOnly
+        val text = ctrl.value.text
+        val isWord = ctrl.language::isWordChar
+        fun move(to: (TextRange) -> Int) = ctrl.moveCarets { sel -> to(sel).let { if (shift) TextRange(sel.start, it) else TextRange(it) } }
+        fun edit(kind: EditKind, op: (String, TextRange) -> CaretEdit?) {
+            if (!ro) ctrl.editCarets(kind, op)
+        }
+        when (Keymap.action(e, Keymap.GROUP_EDITOR)) {
+            "editor.selectAll" -> {
+                ctrl.clearExtraCarets()
+                return false
+            }
+            "editor.duplicate", "editor.deleteLine", "editor.comment", "editor.save", "editor.find", "editor.replace",
+            "editor.undo", "editor.redo", "editor.wrap", "editor.nextOccurrence", "editor.prevOccurrence",
+            "editor.allOccurrences", "editor.caretAbove", "editor.caretBelow", "editor.caretsLineEnds",
+            "editor.findInSelection", "editor.goto", "editor.structure" -> return false
+            null -> Unit
+            // Команды одной каретки (форматирование, перенос строк…) — от основной
+            else -> {
+                ctrl.clearExtraCarets()
+                return false
+            }
+        }
+        when {
+            key == Key.Escape -> ctrl.clearExtraCarets()
+            // ---- буфер обмена ----
+            (ctrlKey && !alt && e.matchesKey(Key.C)) || (ctrlKey && key == Key.Insert) ->
+                clipboard.setText(AnnotatedString(ctrl.caretClipboardText()))
+            (ctrlKey && !alt && e.matchesKey(Key.X)) || (shift && key == Key.Delete) -> if (!ro) {
+                clipboard.setText(AnnotatedString(ctrl.caretClipboardText()))
+                ctrl.cutAtCarets()
+            }
+            (ctrlKey && !alt && e.matchesKey(Key.V)) || (shift && key == Key.Insert) -> if (!ro) {
+                clipboard.getText()?.text?.takeIf { it.isNotEmpty() }?.let { ctrl.pasteAtCarets(it) }
+            }
+            // ---- правка ----
+            key == Key.Backspace && !alt -> edit(EditKind.DELETE) { t, sel -> CaretOps.backspace(t, sel, cfg, word = ctrlKey) }
+            key == Key.Delete && !alt -> edit(EditKind.DELETE) { t, sel -> CaretOps.delete(t, sel, cfg, word = ctrlKey) }
+            (key == Key.Enter || key == Key.NumPadEnter) && !ctrlKey && !alt ->
+                edit(EditKind.OTHER) { t, sel -> CaretOps.newline(t, sel, cfg) }
+            key == Key.Tab && !ctrlKey && !alt -> if (!ro) {
+                when {
+                    shift -> ctrl.shiftLinesAtCarets(indent = false)
+                    ctrl.carets().all { it.collapsed } -> ctrl.editCarets(EditKind.OTHER) { t, sel -> CaretOps.tab(t, sel, cfg) }
+                    else -> ctrl.shiftLinesAtCarets(indent = true)
+                }
+            }
+            // ---- движение: каждая каретка сама по себе ----
+            key == Key.DirectionLeft && !alt -> move { sel ->
+                when {
+                    ctrlKey -> wordStart(text, sel.end, isWord)
+                    !sel.collapsed && !shift -> sel.min
+                    else -> stepLeft(text, sel.end)
+                }
+            }
+            key == Key.DirectionRight && !alt -> move { sel ->
+                when {
+                    ctrlKey -> wordEnd(text, sel.end, isWord)
+                    !sel.collapsed && !shift -> sel.max
+                    else -> stepRight(text, sel.end)
+                }
+            }
+            (key == Key.DirectionUp || key == Key.DirectionDown) && !ctrlKey && !alt -> {
+                val lay = surface.layout ?: return true
+                val delta = if (key == Key.DirectionDown) 1 else -1
+                val all = ctrl.carets()
+                // Каждая каретка помнит свою колонку: пройдя короткую строку, возвращается на неё
+                val known = caretGoals[0]
+                val goals = if (known != null && known.first == all) known.second
+                else IntArray(all.size) { lay.rowAndColumn(all[it].end).second }
+                val moved = all.mapIndexed { i, sel ->
+                    val target = lay.rowAndColumn(sel.end).first + delta
+                    val to = if (target !in 0 until lay.totalRows) sel.end else lay.offsetAt(target, goals[i])
+                    if (shift) TextRange(sel.start, to) else TextRange(to)
+                }
+                ctrl.setCarets(moved, moved[all.indexOf(ctrl.value.selection).coerceAtLeast(0)])
+                val now = ctrl.carets()
+                caretGoals[0] = if (now.size == all.size) now to goals else null
+            }
+            key == Key.MoveHome && !ctrlKey && !alt -> move { sel ->
+                val ls = TextOps.lineStartOf(text, sel.end)
+                var first = ls
+                while (first < text.length && (text[first] == ' ' || text[first] == '\t')) first++
+                if (sel.end == first) ls else first
+            }
+            key == Key.MoveEnd && !ctrlKey && !alt -> move { sel -> TextOps.lineEndOf(text, sel.end) }
+            // Прочее (Ctrl+Home, PgUp, сочетания поверхности) — одной кареткой
+            else -> {
+                if (key == Key.MoveHome || key == Key.MoveEnd || key == Key.PageUp || key == Key.PageDown) ctrl.clearExtraCarets()
+                return false
+            }
+        }
+        return true
     }
 
     fun handleKey(e: KeyEvent): Boolean {
@@ -422,6 +616,7 @@ fun CodeEditorView(
         }
         if (!down) return false
         val ro = effectiveReadOnly
+        if (ctrl.hasMultipleCarets && handleCaretsKey(e)) return true
         ctrl.linked?.let { s ->
             if (key == Key.Escape) {
                 ctrl.endLinked(); return true
@@ -451,6 +646,21 @@ fun CodeEditorView(
             "editor.wrap" -> { prefs.updateSoftWrap(!prefs.softWrap); return true }
             "editor.format" -> { doFormat(); return true }
             "editor.structure" -> { showStructure = true; return true }
+            "editor.findInSelection" -> {
+                if (!find.visible) openFind(false)
+                val sel = ctrl.value.selection
+                if (!sel.collapsed) {
+                    ctrl.searchScope = TextRange(sel.min, sel.max)
+                    find.inSelection = true
+                } else toggleFindInSelection()
+                return true
+            }
+            "editor.nextOccurrence" -> { perform(EditorAction.NextOccurrence); return true }
+            "editor.prevOccurrence" -> { ctrl.unselectLastOccurrence(); return true }
+            "editor.allOccurrences" -> { perform(EditorAction.AllOccurrences); return true }
+            "editor.caretAbove" -> { addCaretVertically(false); return true }
+            "editor.caretBelow" -> { addCaretVertically(true); return true }
+            "editor.caretsLineEnds" -> { perform(EditorAction.CaretsLineEnds); return true }
         }
         when {
             ctrlKey && alt && !shift && (key == Key.Enter || key == Key.NumPadEnter) -> {
@@ -485,8 +695,10 @@ fun CodeEditorView(
             }
             key == Key.F6 && shift && !ctrlKey -> { perform(EditorAction.Rename); return true }
             key == Key.Escape -> {
+                if (ctrl.clearExtraCarets()) return true
                 if (find.visible) {
                     find.visible = false
+                    find.inSelection = false
                     return true
                 }
                 return false
@@ -522,16 +734,8 @@ fun CodeEditorView(
                 return false
             }
         }
-        // Ctrl+Home / Ctrl+End — начало и конец текста: поле Compose их не выполняло (курсор оставался на месте)
-        if (ctrlKey && !alt && (key == Key.MoveHome || key == Key.MoveEnd)) {
-            if (down) {
-                val target = if (key == Key.MoveHome) 0 else v.text.length
-                ctrl.value = v.copy(selection = TextRange(if (shift) v.selection.start else target, target))
-                ctrl.history.breakGroup()
-                ctrl.requestReveal(target)
-            }
-            return true
-        }
+        // Home, Ctrl+Home и Ctrl+End делает поверхность: там же прокрутка к каретке и память колонки
+        // для стрелок вверх-вниз. Отсюда Home не прокручивал длинную строку к её началу
         if (ctrlKey || ro) return false
         when (key) {
             Key.Enter, Key.NumPadEnter -> {
@@ -562,14 +766,22 @@ fun CodeEditorView(
                 edit(TextOps.tab(v, cfg, ctrl.snapshot))
                 return true
             }
-            Key.MoveHome -> {
-                if (alt) return false
-                ctrl.value = TextOps.smartHome(v, shift)
-                ctrl.history.breakGroup()
-                return true
-            }
         }
         return false
+    }
+
+    /**
+     * Вставка из буфера обмена — одной правкой, без автоскобок и подсказок: раньше она шла как ввод,
+     * и вставленная «(» или «"» получала лишнюю парную.
+     */
+    fun paste(raw: String) {
+        if (effectiveReadOnly || raw.isEmpty()) return
+        val v = ctrl.value
+        val inserted = TextCodec.normalize(raw)
+        val from = v.selection.min
+        val to = v.selection.max
+        ctrl.applyEdit(TextFieldValue(v.text.substring(0, from) + inserted + v.text.substring(to), TextRange(from + inserted.length)))
+        ctrl.closeCompletion()
     }
 
     fun onChange(new: TextFieldValue) {
@@ -639,7 +851,8 @@ fun CodeEditorView(
     }
 
     val findOptions = find.options
-    LaunchedEffect(ctrl, find.visible, findOptions, version) {
+    val findScope = if (find.inSelection) ctrl.searchScope else null
+    LaunchedEffect(ctrl, find.visible, findOptions, version, findScope) {
         if (!find.visible || findOptions.query.isEmpty()) {
             matches = SearchMatches.EMPTY
             currentMatch = -1
@@ -651,8 +864,9 @@ fun CodeEditorView(
         if (findOptions != lastFindOptions) matches = SearchMatches.EMPTY
         if (text.length > 200_000) delay(150)
         val job = coroutineContext[kotlinx.coroutines.Job]
+        val within = findScope?.let { it.min until it.max }
         val m = withContext(Dispatchers.Default) {
-            SearchEngine.findAll(text, findOptions, cancelled = { job?.isActive == false })
+            SearchEngine.findAll(text, findOptions, cancelled = { job?.isActive == false }, within = within)
         }
         if (ctrl.value.text != text) return@LaunchedEffect
         matches = m
@@ -706,6 +920,8 @@ fun CodeEditorView(
     val contextItems: () -> List<EditorMenuItem> = {
         val v = ctrl.value
         val hasSelection = !v.selection.collapsed
+        // Несколько кареток: буфер обмена работает со всеми сразу
+        val multi = ctrl.hasMultipleCarets
         fun selectedText(): String {
             val from = minOf(v.selection.start, v.selection.end)
             val to = maxOf(v.selection.start, v.selection.end)
@@ -714,38 +930,42 @@ fun CodeEditorView(
         buildList {
             if (!effectiveReadOnly) {
                 add(
-                    EditorMenuItem("Вырезать", "Ctrl+X", Icons.Default.ContentCut, hasSelection) {
+                    EditorMenuItem("Отменить", Keymap.label("editor.undo"), Icons.AutoMirrored.Filled.Undo, ctrl.history.canUndo) {
+                        perform(EditorAction.Undo)
+                    }
+                )
+                add(
+                    EditorMenuItem("Повторить", Keymap.label("editor.redo"), Icons.AutoMirrored.Filled.Redo, ctrl.history.canRedo) {
+                        perform(EditorAction.Redo)
+                    }
+                )
+                add(EditorMenuItem.separator())
+                add(
+                    EditorMenuItem("Вырезать", "Ctrl+X", Icons.Default.ContentCut, hasSelection || multi) {
+                        if (multi) {
+                            clip.setText(AnnotatedString(ctrl.caretClipboardText()))
+                            ctrl.cutAtCarets()
+                            return@EditorMenuItem
+                        }
                         val from = minOf(v.selection.start, v.selection.end)
                         val to = maxOf(v.selection.start, v.selection.end)
-                        clip.setText(androidx.compose.ui.text.AnnotatedString(selectedText()))
-                        onChange(
-                            androidx.compose.ui.text.input.TextFieldValue(
-                                v.text.substring(0, from) + v.text.substring(to),
-                                androidx.compose.ui.text.TextRange(from)
-                            )
-                        )
+                        clip.setText(AnnotatedString(selectedText()))
+                        onChange(TextFieldValue(v.text.substring(0, from) + v.text.substring(to), TextRange(from)))
                     }
                 )
             }
             add(
-                EditorMenuItem("Копировать", "Ctrl+C", Icons.Default.ContentCopy, hasSelection) {
-                    clip.setText(androidx.compose.ui.text.AnnotatedString(selectedText()))
+                EditorMenuItem("Копировать", "Ctrl+C", Icons.Default.ContentCopy, hasSelection || multi) {
+                    clip.setText(AnnotatedString(if (multi) ctrl.caretClipboardText() else selectedText()))
                 }
             )
             if (!effectiveReadOnly) {
                 add(
                     EditorMenuItem("Вставить", "Ctrl+V", Icons.Default.ContentPaste) {
-                        val pasted = clip.getText()?.text.orEmpty().replace("\r\n", "\n").replace('\r', '\n')
-                        if (pasted.isNotEmpty()) {
-                            val from = minOf(v.selection.start, v.selection.end)
-                            val to = maxOf(v.selection.start, v.selection.end)
-                            onChange(
-                                androidx.compose.ui.text.input.TextFieldValue(
-                                    v.text.substring(0, from) + pasted + v.text.substring(to),
-                                    androidx.compose.ui.text.TextRange(from + pasted.length)
-                                )
-                            )
-                        }
+                        val pasted = clip.getText()?.text.orEmpty()
+                        if (multi) {
+                            if (pasted.isNotEmpty()) ctrl.pasteAtCarets(pasted)
+                        } else paste(pasted)
                     }
                 )
             }
@@ -759,8 +979,9 @@ fun CodeEditorView(
                 if (formatLabel != null) {
                     add(EditorMenuItem("Форматировать", Keymap.label("editor.format"), Icons.Default.AutoFixHigh) { doFormat() })
                 }
-                add(EditorMenuItem("Закомментировать", Keymap.label("editor.comment"), Icons.Default.Comment) { perform(EditorAction.LineComment) })
+                add(EditorMenuItem("Закомментировать", Keymap.label("editor.comment"), Icons.AutoMirrored.Filled.Comment) { perform(EditorAction.LineComment) })
                 add(EditorMenuItem("Переименовать вхождения", "Shift+F6", Icons.Default.Edit) { perform(EditorAction.Rename) })
+                add(EditorMenuItem("Каретки на все вхождения", Keymap.label("editor.allOccurrences"), Icons.Default.SelectAll) { perform(EditorAction.AllOccurrences) })
                 add(EditorMenuItem("Дублировать", Keymap.label("editor.duplicate"), Icons.Default.LibraryAdd) { perform(EditorAction.Duplicate) })
                 add(EditorMenuItem.separator())
             }
@@ -784,7 +1005,12 @@ fun CodeEditorView(
                 saveButtonText = if (backgroundSave?.busy == true) "Сохранение…" else saveButtonText,
                 errorPrefix = errorPrefix,
                 onSave = { trySave() },
-                onFind = { if (find.visible) find.visible = false else openFind(false) },
+                onFind = {
+                    if (find.visible) {
+                        find.visible = false
+                        find.inSelection = false
+                    } else openFind(false)
+                },
                 onFormat = { doFormat() },
                 formatLabel = formatLabel,
                 onCopyAll = {
@@ -813,7 +1039,18 @@ fun CodeEditorView(
                     onReplaceAll = { replaceAll() },
                     onClose = {
                         find.visible = false
+                        find.inSelection = false
                         focusEditor()
+                    },
+                    onToggleInSelection = { toggleFindInSelection() },
+                    onSelectAll = { selectAllMatches() },
+                    // Сохранить и перейти к строке можно и не уходя из строки поиска
+                    onEditorKey = { e ->
+                        when (Keymap.action(e, Keymap.GROUP_EDITOR)) {
+                            "editor.save" -> canSave.also { if (it) trySave() }
+                            "editor.goto" -> true.also { showGoto = true }
+                            else -> false
+                        }
                     }
                 )
             }
@@ -828,13 +1065,10 @@ fun CodeEditorView(
                     Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
                 }
                 // Пределы теперь у быстрой поверхности: она рисует только видимые строки.
-                // Ключ — версия, а не текст: сравнение текста было полным проходом на каждую букву
+                // Ключ — версия, а не текст: сравнение текста было полным проходом на каждую букву.
+                // Шрифт больше не уменьшается на длинных файлах: общей раскладки высотой в весь текст
+                // (и её предела в 16 777 215 px) у быстрой поверхности нет
                 val tooBig = remember(ctrl.version) { EditorLimits.fastProblem(ctrl.value.text) }
-                // Высота раскладки Compose — не больше 16 777 215 px: на огромном тексте крупный шрифт уменьшается
-                val density = LocalDensity.current.density
-                val rows = ctrl.model.lineCount.toLong() + if (prefs.softWrap) ctrl.value.text.length / 40 else 0
-                val fontCap = (15_000_000.0 / (rows.coerceAtLeast(1) * 1.54 * density)).toFloat()
-                val shownFont = minOf(fontSizeSp, fontCap).coerceAtLeast(6f)
                 if (tooBig != null) {
                     Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                         Text(
@@ -847,14 +1081,19 @@ fun CodeEditorView(
                     ctrl = ctrl,
                     state = surface,
                     readOnly = effectiveReadOnly,
-                    fontSize = shownFont.sp,
-                    lineHeight = (shownFont * 1.54f).sp,
-                    search = SearchHighlight(matches, currentMatch),
+                    fontSize = fontSizeSp.sp,
+                    lineHeight = (fontSizeSp * 1.54f).sp,
+                    search = SearchHighlight(matches, currentMatch, findScope.takeIf { find.visible }),
                     focusRequester = focus,
                     onKey = ::handleKey,
                     onChange = ::onChange,
+                    onPaste = ::paste,
+                    onTypeCarets = { typed ->
+                        if (!effectiveReadOnly) ctrl.editCarets(EditKind.TYPING) { text, sel -> CaretOps.type(text, sel, typed, cfg) }
+                    },
                     contextItems = contextItems,
-                    onZoom = { prefs.updateFontSize(fontSizeSp + it) },
+                    // Размер читаем в момент прокрутки колесом: захваченный при первом показе давал только один шаг
+                    onZoom = { prefs.updateFontSize(prefs.fontSizeSp + it) },
                     modifier = Modifier.weight(1f).fillMaxHeight()
                 )
             }

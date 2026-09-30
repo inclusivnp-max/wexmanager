@@ -81,8 +81,11 @@ object XmlLexer : LineLexer {
                         }
                         isNameChar(c) -> {
                             var j = i
-                            while (j < n && isNameChar(line[j])) j++
-                            val colon = line.indexOf(':', i).takeIf { it in (i + 1) until j }
+                            var colon: Int? = null
+                            while (j < n && isNameChar(line[j])) {
+                                if (colon == null && j > i && line[j] == ':') colon = j
+                                j++
+                            }
                             if (colon != null) {
                                 // android:layout_width — префикс пространства имён отдельно
                                 out.add(i, colon + 1, Tok.MODIFIER)
@@ -96,14 +99,20 @@ object XmlLexer : LineLexer {
                     }
                 }
                 else -> { // TEXT
+                    // «&» ищем только до ближайшего «<»: поиск до конца строки после каждого тега
+                    // на минифицированном SVG в одну строку превращался в минуты работы
                     val lt = line.indexOf('<', i)
-                    val amp = line.indexOf('&', i)
-                    val next = listOf(lt, amp).filter { it >= 0 }.minOrNull()
-                    if (next == null) return TEXT
+                    val limit = if (lt < 0) n else lt
+                    var amp = i
+                    while (amp < limit && line[amp] != '&') amp++
+                    val next = if (amp < limit) amp else lt
+                    if (next < 0) return TEXT
                     i = next
                     if (line[i] == '&') {
-                        val semi = line.indexOf(';', i)
-                        if (semi in (i + 2)..(i + 12)) {
+                        var semi = i + 1
+                        val semiLimit = minOf(n, i + 13)
+                        while (semi < semiLimit && line[semi] != ';') semi++
+                        if (semi < semiLimit && semi >= i + 2) {
                             out.add(i, semi + 1, Tok.ENTITY); i = semi + 1
                         } else i++
                         continue
@@ -173,13 +182,29 @@ object XmlLexer : LineLexer {
 
 /** Markdown: заголовки, списки, цитаты, код, выделение, ссылки. */
 object MarkdownLexer : LineLexer {
+    /**
+     * Горизонтальная черта: три и больше одинаковых «-», «*» или «_», между ними пробелы. Раньше это
+     * была регулярка с повтором группы — на строке из тысяч дефисов она переполняла стек.
+     */
+    private fun isRule(line: String): Boolean {
+        var i = 0
+        while (i < line.length && i < 3 && line[i] == ' ') i++
+        val mark = line.getOrNull(i)?.takeIf { it == '-' || it == '*' || it == '_' } ?: return false
+        var count = 0
+        while (i < line.length) {
+            val c = line[i]
+            if (c == mark) count++ else if (!c.isWhitespace()) return false
+            i++
+        }
+        return count >= 3
+    }
+
     private const val NORMAL = 0
     private const val FENCE_BACKTICK = 1
     private const val FENCE_TILDE = 2
 
     private val heading = Regex("^\\s{0,3}#{1,6}(\\s|$)")
     private val listMarker = Regex("^(\\s*)([-*+]|\\d+[.)])(\\s+)(\\[[ xX]]\\s)?")
-    private val hr = Regex("^\\s{0,3}([-*_])(\\s*\\1){2,}\\s*$")
 
     override fun tokenize(line: String, state: Int, out: MutableList<Token>): Int {
         val trimmed = line.trimStart()
@@ -198,7 +223,7 @@ object MarkdownLexer : LineLexer {
             heading.containsMatchIn(line) -> {
                 out.add(0, line.length, Tok.HEADING); return NORMAL
             }
-            hr.matches(line) -> {
+            isRule(line) -> {
                 out.add(0, line.length, Tok.META); return NORMAL
             }
             trimmed.startsWith(">") -> {

@@ -885,33 +885,26 @@ private fun ArscSearchTab(
     version: Int,
     onSelectConfig: (ArscConfig) -> Unit
 ) {
-    @Suppress("UNUSED_EXPRESSION") version
     var query by remember { mutableStateOf("") }
-    val pool = remember(version) { doc.currentGlobalStrings() }
+    // Пул строк разбирается один раз на версию документа — и не в потоке окна (100 000+ строк)
+    val pool = remember(version) { java.util.concurrent.atomic.AtomicReference<List<String>?>(null) }
 
-    val results = remember(query, pool) {
+    // Поиск — после паузы в наборе и в фоне: обход всех записей всех конфигураций (100 000–1 000 000)
+    // на каждый символ замораживал окно на секунды. Пока ищется новое, видны прежние результаты
+    val results by androidx.compose.runtime.produceState(emptyList<SearchResultItem>(), query, version) {
         val q = query.trim()
-        if (q.isBlank()) return@remember emptyList<SearchResultItem>()
-        val out = ArrayList<SearchResultItem>()
-
-        for (pkg in doc.packages) {
-            for (t in pkg.types) {
-                for (c in t.configs) {
-                    for (e in c.entries) {
-                        val valStr = e.displayValue(pool)
-                        val idHex = "0x%08x".format(e.resId)
-                        val match = e.name.contains(q, ignoreCase = true) ||
-                                idHex.contains(q, ignoreCase = true) ||
-                                valStr.contains(q, ignoreCase = true)
-                        if (match) {
-                            out.add(SearchResultItem(pkg, t, c, e, valStr))
-                            if (out.size >= 500) return@remember out
-                        }
-                    }
-                }
-            }
+        if (q.isBlank()) {
+            value = emptyList()
+            return@produceState
         }
-        out
+        kotlinx.coroutines.delay(150)
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            // Документ правят в потоке окна; если поиск попал на правку — оставим прежние результаты
+            runCatching {
+                val strings = pool.get() ?: doc.currentGlobalStrings().also { pool.set(it) }
+                searchArsc(doc, strings, q)
+            }.getOrElse { value }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -1114,3 +1107,26 @@ private fun ArscStringsTab(doc: ArscDocument, version: Int, onChanged: () -> Uni
         }
     }
 }
+
+/** Поиск записей ARSC по имени, ID и значению; не больше 500 находок. */
+private fun searchArsc(doc: ArscDocument, pool: List<String>, q: String): List<SearchResultItem> {
+    val out = ArrayList<SearchResultItem>()
+    for (pkg in doc.packages) {
+        for (t in pkg.types) {
+            for (c in t.configs) {
+                for (e in c.entries) {
+                    // ID — без String.format на каждую запись (их сотни тысяч)
+                    val byKey = e.name.contains(q, ignoreCase = true) || hexId(e.resId).contains(q, ignoreCase = true)
+                    val valStr = e.displayValue(pool)
+                    if (byKey || valStr.contains(q, ignoreCase = true)) {
+                        out.add(SearchResultItem(pkg, t, c, e, valStr))
+                        if (out.size >= 500) return out
+                    }
+                }
+            }
+        }
+    }
+    return out
+}
+
+private fun hexId(id: Int): String = "0x" + Integer.toHexString(id).padStart(8, '0')

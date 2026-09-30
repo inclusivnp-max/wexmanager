@@ -3,6 +3,7 @@ package org.wexclient.app.util
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.io.File
 import java.io.IOException
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
@@ -30,6 +31,11 @@ object SingleInstance {
 
     private var counter = 0L
 
+    /** Сокет открыт: следующий запуск найдёт этот процесс. Иначе держать его без окон незачем. */
+    @Volatile
+    var listening = false
+        private set
+
     /**
      * Путь к сокету Unix не длиннее 108 байт, поэтому сначала XDG_RUNTIME_DIR (обычно /run/user/1000),
      * а если он длинный или его нет — короткое имя в /tmp.
@@ -39,8 +45,11 @@ object SingleInstance {
         val runtime = System.getenv("XDG_RUNTIME_DIR")
             ?.takeIf { Files.isDirectory(Paths.get(it)) }
             ?.let { Paths.get(it, "wexdesktop.sock") }
+        // На Windows /tmp — это C:\tmp, которого нет: сокет не создавался, и закрытое окно оставляло
+        // невидимый процесс, до которого следующий запуск не мог достучаться
+        val tmp = if (File.separatorChar == '\\') System.getProperty("java.io.tmpdir") else "/tmp"
         if (runtime != null && runtime.toString().toByteArray().size < 100) runtime
-        else Paths.get("/tmp", "wexdesktop-$user.sock")
+        else Paths.get(tmp, "wexdesktop-$user.sock")
     }
 
     /**
@@ -65,6 +74,19 @@ object SingleInstance {
         false
     }
 
+    private var server: ServerSocketChannel? = null
+
+    /**
+     * Выход начался: новые запуски больше не отдавать этому процессу — он дописывает сохранения и уходит,
+     * и путь, отданный ему, потерялся бы. Следующий запуск поднимет свой процесс.
+     */
+    fun stop() {
+        listening = false
+        runCatching { server?.close() }
+        server = null
+        runCatching { Files.deleteIfExists(socketFile) }
+    }
+
     /** Слово вместо пути: настоящие пути всегда абсолютные, так что перепутать нельзя. */
     private const val PING = "ping"
 
@@ -75,6 +97,8 @@ object SingleInstance {
         } catch (_: Exception) {
             return
         }
+        listening = true
+        this.server = server
         Runtime.getRuntime().addShutdownHook(Thread {
             runCatching { server.close() }
             runCatching { Files.deleteIfExists(socketFile) }

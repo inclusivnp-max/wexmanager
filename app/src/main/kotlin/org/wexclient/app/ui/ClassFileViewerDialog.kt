@@ -162,7 +162,7 @@ fun ClassFileViewerDialog(entry: VfsEntry, vfsManager: VfsManager, onDismiss: ()
                                     modifier = Modifier.align(Alignment.Center),
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    CircularProgressIndicator(color = NoctaliaPrimary)
+                                    WexSpinner(color = NoctaliaPrimary)
                                     Spacer(modifier = Modifier.size(10.dp))
                                     Text(
                                         if (info == null) "Чтение класса…" else "${view.title}: декомпиляция…",

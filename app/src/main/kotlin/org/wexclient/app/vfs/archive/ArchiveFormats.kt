@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import kotlin.concurrent.thread
+import org.wexclient.app.util.ProcessRunner
 import org.wexclient.app.util.startHelper
 
 /** Сжатие поверх tar или одиночного файла. Всё, кроме gzip, — через системные утилиты. */
@@ -110,17 +111,8 @@ object ArchiveFormats {
     fun label(fileName: String): String =
         kindOf(fileName)?.label ?: fileName.substringAfterLast('.', "").uppercase().ifEmpty { "ZIP" }
 
-    private val toolCache = HashMap<String, Boolean>()
-
-    fun toolAvailable(tool: String): Boolean = synchronized(toolCache) {
-        toolCache.getOrPut(tool) {
-            val path = System.getenv("PATH") ?: return@getOrPut false
-            path.split(File.pathSeparator).any { dir ->
-                val f = File(dir, tool)
-                f.isFile && f.canExecute()
-            }
-        }
-    }
+    /** Есть ли утилита в PATH; на Windows — с .exe/.bat/.cmd (см. [ProcessRunner.which]). */
+    fun toolAvailable(tool: String): Boolean = ProcessRunner.isAvailable(tool)
 
     internal fun requireTool(c: Compression) {
         val tool = c.tool ?: return

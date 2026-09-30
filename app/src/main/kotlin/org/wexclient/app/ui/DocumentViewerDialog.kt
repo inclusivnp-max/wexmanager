@@ -47,9 +47,11 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import org.wexclient.app.util.frozen
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -63,6 +65,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.wexclient.app.doc.DocAlign
 import org.wexclient.app.doc.DocBlock
@@ -170,7 +173,7 @@ fun DocumentViewerDialog(entry: VfsEntry, onDismiss: () -> Unit) {
     ) {
         when {
             result == null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = NoctaliaPrimary)
+                WexSpinner(color = NoctaliaPrimary)
             }
             doc == null -> GrailEmptyState(
                 "Не удалось прочитать документ: " + (result.exceptionOrNull()?.message ?: "неизвестная ошибка")
@@ -417,13 +420,26 @@ private fun DocTable(table: DocBlock.Table) {
 
 @Composable
 private fun DocPicture(picture: DocBlock.Picture) {
-    val bitmap = remember(picture.name) {
-        runCatching {
-            org.jetbrains.skia.Image.makeFromEncoded(picture.bytes).toComposeImageBitmap()
-        }.getOrNull()
+    // Не в потоке окна и сразу в размер показа (не шире 640 dp — с запасом на HiDPI): фото в 20 Мп
+    // из DOCX разбиралось целиком прямо при прокрутке к нему. null — ещё грузится
+    val loaded by androidx.compose.runtime.produceState<Result<androidx.compose.ui.graphics.ImageBitmap?>?>(null, picture.name) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                org.wexclient.app.util.ImageScale.decodeScaled(picture.bytes, maxPx = 1600, maxSourcePx = 16384, maxSourcePixels = 100_000_000)
+                    // Прокрутили дальше, пока разбирали, — пиксели сразу отдаём
+                    ?.also { b -> if (!isActive) b.asSkiaBitmap().close() }
+            }
+        }
+    }
+    val bitmap = loaded?.getOrNull()
+    // Картинка ушла из списка — пиксели закрываем сами: сборщик мусора нативную память не видит
+    androidx.compose.runtime.DisposableEffect(bitmap) {
+        onDispose { bitmap?.let { runCatching { it.asSkiaBitmap().close() } } }
     }
     Box(modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
-        if (bitmap == null) {
+        if (loaded == null) {
+            Box(modifier = Modifier.height(48.dp))
+        } else if (bitmap == null) {
             Text(
                 text = "[картинка ${picture.name} не читается]",
                 style = MaterialTheme.typography.labelSmall,
