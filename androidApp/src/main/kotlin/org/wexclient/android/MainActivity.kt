@@ -1,0 +1,21 @@
+package org.wexclient.android
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
+import android.graphics.Color
+import org.wexclient.android.nav.WexRoot
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // Тема всегда тёмная: светлые значки в строке состояния и навигации
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+        )
+        super.onCreate(savedInstanceState)
+        setContent { WexRoot() }
+    }
+}

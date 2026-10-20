@@ -54,9 +54,14 @@ bin/
 /.idea/usage.statistics.xml
 /.idea/dictionaries/
 /.idea/shelf/
-# Чужие ключи подписи сюда попадать не должны: свои WEX держит в ~/.config/wexdesktop/keys.
-# Файлы app/src/main/resources/signing/testkey.* — это публичный тестовый ключ AOSP,
-# часть ресурсов программы, и они версионируются намеренно.
+# Личные ключи подписи. Публичный AOSP testkey в ресурсах версионируется.
 *.jks
 *.keystore
 *.p12
+
+### Android ###
+local.properties
+
+# Журналы аварий JVM
+hs_err_pid*.log
+replay_pid*.log

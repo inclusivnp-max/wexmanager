@@ -1,26 +1,41 @@
-# Version catalog is a central place for you to declare and version dependencies
-# https://docs.gradle.org/current/userguide/platforms.html#sub:version-catalog
-# https://docs.gradle.org/current/userguide/platforms.html#sub::toml-dependencies-format
-
 [versions]
-kotlin = "2.1.21"
-composeMultiplatform = "1.7.3"
-kotlinxDatetime = "0.7.1"
-kotlinxSerializationJSON = "1.9.0"
+kotlin = "2.4.20"
+composeMultiplatform = "1.12.1"
+# Material 3 с Expressive API (MaterialExpressiveTheme, MotionScheme): публичный только в ветке androidx 1.5 alpha;
+# у JetBrains это 1.12.0-alpha — собрана под Compose 1.12
+material3 = "1.12.0-alpha03"
+# Иконки JetBrains больше не публикует новее 1.7.3 — это просто ImageVector, с новым Compose работают
+materialIcons = "1.7.3"
+# Android: сборка, навигация (Navigation 3), ViewModel, внедрение зависимостей (Koin)
+agp = "9.3.3"
+navigation3 = "1.1.2"
+lifecycle = "2.11.0"
+koin = "4.2.2"
+activityCompose = "1.13.0"
 kotlinxCoroutines = "1.10.2"
 
 [libraries]
 kotlinGradlePlugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
-kotlinxDatetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinxDatetime" }
-kotlinxSerialization = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerializationJSON" }
+# AGP — в buildSrc рядом с Kotlin: иначе KotlinAndroidTarget не видит классы AGP (разные загрузчики)
+androidGradlePlugin = { module = "com.android.tools.build:gradle", version.ref = "agp" }
 kotlinxCoroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
 kotlinxCoroutinesSwing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinxCoroutines" }
-
-# Libraries can be bundled together for easier import
-[bundles]
-kotlinxEcosystem = ["kotlinxDatetime", "kotlinxSerialization", "kotlinxCoroutines"]
+kotlinxCoroutinesAndroid = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+composeMaterial3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "material3" }
+composeMaterialIconsExtended = { module = "org.jetbrains.compose.material:material-icons-extended", version.ref = "materialIcons" }
+navigation3Ui = { module = "org.jetbrains.androidx.navigation3:navigation3-ui", version.ref = "navigation3" }
+lifecycleViewmodelCompose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+lifecycleViewmodelNavigation3 = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-navigation3", version.ref = "lifecycle" }
+lifecycleRuntimeCompose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
+koinBom = { module = "io.insert-koin:koin-bom", version.ref = "koin" }
+koinCore = { module = "io.insert-koin:koin-core" }
+koinCompose = { module = "io.insert-koin:koin-compose" }
+koinComposeViewmodel = { module = "io.insert-koin:koin-compose-viewmodel" }
+koinComposeNavigation3 = { module = "io.insert-koin:koin-compose-navigation3" }
+koinAndroid = { module = "io.insert-koin:koin-android" }
+androidxActivityCompose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 
 [plugins]
-kotlinPluginSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
 composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }

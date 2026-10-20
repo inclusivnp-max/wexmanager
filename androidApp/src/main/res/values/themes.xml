@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Окно до первого кадра Compose — в цвет фона темы Noctalia, без белой вспышки -->
+    <style name="Theme.Wex" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/wex_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+    <color name="wex_background">#FF181211</color>
+</resources>
