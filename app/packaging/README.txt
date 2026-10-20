@@ -4,6 +4,8 @@ WEX Desktop
 
 Запуск в Linux:
     ./start.sh
+    ./start.sh --help
+    ./start.sh --version
 
 Java включена в дистрибутив. Распакованную папку можно разместить, например,
 в ~/Apps/WEXdesktop. Скрипт start.sh задаёт окружение для запуска под Wayland.

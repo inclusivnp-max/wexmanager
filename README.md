@@ -1,5 +1,7 @@
 # WEX Desktop
 
+[![Build](https://github.com/inclusivnp-max/wexmanager/actions/workflows/build.yml/badge.svg)](https://github.com/inclusivnp-max/wexmanager/actions/workflows/build.yml)
+
 Двухпанельный файловый менеджер для Linux и Windows. Внутри есть редактор кода,
 терминал и инструменты для APK: можно открыть пакет, посмотреть DEX и ресурсы,
 внести изменения, подписать и установить результат через ADB.
@@ -30,12 +32,47 @@
 Набор функций Android-версии отличается от настольной: у неё свои просмотрщики,
 способ запуска команд и доступ к хранилищу.
 
+## Готовые сборки
+
+[GitHub Actions](https://github.com/inclusivnp-max/wexmanager/actions/workflows/build.yml)
+собирает проект для Linux x64, Windows x64 и Android. Откройте успешный запуск
+и раздел **Artifacts**:
+
+- `WEXdesktop-Linux` — архив `tar.gz` со встроенной Java. Распакуйте его и запустите `WEXdesktop/start.sh`.
+- `WEXdesktop-Windows` — установщик `msi` со встроенной Java.
+- `WEX-Android-debug` — отладочный APK для Android 8.0 и новее (API 26).
+
+APK подписан отладочным ключом, а не постоянным ключом выпуска. Сборки из разных
+запусков Actions могут требовать удаления предыдущего APK перед установкой.
+
 ## Сборка и запуск
 
-Нужны **JDK 21** и **Android SDK 37**.
-Android SDK требуется и при конфигурации настольной сборки: Android-модули
-подключены в общем [settings.gradle.kts](settings.gradle.kts).
-Путь к SDK задаётся через `ANDROID_HOME` или `sdk.dir` в `local.properties`.
+Нужны **Git**, **JDK 21**, **Android SDK 37.0** и **Build Tools 37.0.0**.
+Gradle отдельно устанавливать не нужно — в репозитории есть wrapper.
+Android SDK требуется и для настольной сборки: Android-модули подключены
+в общем [settings.gradle.kts](settings.gradle.kts).
+
+```bash
+git clone https://github.com/inclusivnp-max/wexmanager.git
+cd wexmanager
+```
+
+SDK можно установить через Android Studio или командные инструменты Android:
+
+```bash
+sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+```
+
+Путь к SDK задаётся через `ANDROID_HOME` или `sdk.dir` в локальном файле
+`local.properties`. Например, в Linux:
+
+```properties
+sdk.dir=/home/yourname/Android/Sdk
+```
+
+В Windows можно использовать прямые слеши: `sdk.dir=C:/Android/Sdk`.
+Этот файл, сборки и личные ключи в Git не попадают. Для первого запуска сборки
+нужен интернет: Gradle скачивает зависимости из объявленных репозиториев.
 
 Исходники clazzpatcher уже находятся в [third_party/clazzpatcher/](third_party/clazzpatcher/).
 Gradle собирает их вместе с WEX; скачивать библиотеку отдельно или настраивать
@@ -56,7 +93,21 @@ Gradle собирает их вместе с WEX; скачивать библи�
 ./gradlew :androidApp:assembleDebug   # собрать отладочный APK
 ```
 
-В Windows вместо `./gradlew` используется `gradlew.bat`.
+В PowerShell вместо `./gradlew` используется `.\gradlew.bat`.
+
+В Linux для тестов интерфейса нужен графический сеанс или Xvfb:
+
+```bash
+xvfb-run -a ./gradlew :shared:desktopTest
+```
+
+Проверки скриптов запуска выполняются после сборки `:app:installDist`:
+
+```bash
+python3 tools/test_packaging.py
+```
+
+В Windows эта команда запускается через `python`.
 
 ### Дистрибутив
 
@@ -69,6 +120,11 @@ Gradle собирает их вместе с WEX; скачивать библи�
 `packageApp` на Linux собирает `app/build/packages/WEXdesktop-linux-x64.tar.gz`,
 на Windows — MSI в `app/build/packages/`. Пакет собирается на целевой ОС.
 Linux-версия из архива запускается через `WEXdesktop/start.sh`.
+Для MSI нужен WiX Toolset 3 (`candle.exe` и `light.exe` в `PATH`).
+
+В собранном приложении `--help` показывает параметры запуска, а `--version` —
+версию. Эти команды работают без графического сеанса. `--background` запускает
+WEX без открытия окна; путь к файлу или папке можно передать отдельным аргументом.
 
 ## Внешние инструменты
 

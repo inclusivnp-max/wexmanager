@@ -17,6 +17,8 @@ dependencies {
     runtimeOnly("org.jetbrains.skiko:skiko-awt-runtime-windows-x64:0.150.1")
 }
 
+private val appVersion = "1.0.0"
+
 /** Доступ к X11-пиру AWT для освобождения закрытых окон в util/SwingLeaks.kt. */
 val awtX11Exports = "--add-exports=java.desktop/sun.awt.X11=ALL-UNNAMED"
 
@@ -34,20 +36,33 @@ val heapGrowth = "-XX:GCTimeRatio=4"
 
 /** Ограничения арен glibc и ожидания vsync в драйвере NVIDIA задаются до запуска JVM.
  * Пользовательские значения сохраняются в WEX_ORIG_* для дочерних процессов (ChildEnv). */
-val nativeEnv = mapOf("MALLOC_ARENA_MAX" to "2", "__GL_YIELD" to "USLEEP")
+val nativeEnv = mapOf(
+    "_JAVA_AWT_WM_NONREPARENTING" to "1",
+    "MALLOC_ARENA_MAX" to "2",
+    "__GL_YIELD" to "USLEEP"
+)
 
 tasks.named<CreateStartScripts>("startScripts") {
     // Копия: лямбда doLast не может держать ссылку на сам скрипт (configuration cache)
     val env = nativeEnv.toMap()
+    val linuxOptions = listOf(awtX11Exports, trimNativeHeap)
     doLast {
         val script = unixScript
         val exports = env.entries.joinToString("\n", postfix = "\n") { (k, v) ->
             "[ -z \"\${WEX_ORIG_$k+x}\" ] && export WEX_ORIG_$k=\"\${$k+=\$$k}\"\nexport $k=\"\${$k:-$v}\""
         }
         val marker = "\nexec \"\$JAVACMD\" \"\$@\""
-        val text = script.readText()
+        // Остальной classpath уже записан в манифест app.jar. Иначе .bat превышает лимит cmd.exe.
+        val text = script.readText().replace(Regex("(?m)^CLASSPATH=[^\r\n]*")) {
+            "CLASSPATH=\"\$APP_HOME/lib/app.jar\""
+        }
+        windowsScript.writeText(windowsScript.readText().replace(Regex("(?m)^set CLASSPATH=[^\r\n]*")) {
+            "set CLASSPATH=%APP_HOME%\\lib\\app.jar"
+        })
         check(marker in text) { "Не нашлась строка запуска Java в ${script.name}" }
-        script.writeText(text.replace(marker, "\n# Окружение процесса WEX (см. nativeEnv в build.gradle.kts)\n$exports$marker"))
+        val options = linuxOptions.joinToString(" ") { "\"$it\"" }
+        val platform = "case \"\$(uname -s)\" in\n    Linux*) set -- $options \"\$@\" ;;\nesac\n"
+        script.writeText(text.replace(marker, "\n$exports$platform$marker"))
     }
 }
 
@@ -78,8 +93,6 @@ application {
         // Пути с кириллицей/иероглифами и буфер обмена не должны зависеть от локали запуска
         "-Dfile.encoding=UTF-8",
         "-Dsun.jnu.encoding=UTF-8",
-        awtX11Exports,
-        trimNativeHeap,
         concurrentExplicitGc,
         heapGrowth
     ) + idleGc
@@ -98,21 +111,30 @@ tasks.withType<Test>().configureEach {
 
 tasks.withType<JavaExec>().configureEach {
     val nativeEnvCopy = nativeEnv.toMap()
-    environment("_JAVA_AWT_WM_NONREPARENTING", "1")
-    nativeEnvCopy.forEach { (k, v) -> if (System.getenv(k) == null) environment(k, v) }
+    nativeEnvCopy.forEach { (key, default) ->
+        val original = System.getenv(key)
+        if (System.getenv("WEX_ORIG_$key") == null) {
+            environment("WEX_ORIG_$key", original?.let { "=$it" } ?: "")
+        }
+        environment(key, if (key == "_JAVA_AWT_WM_NONREPARENTING") default else original ?: default)
+    }
+    systemProperty("wex.version", appVersion)
     systemProperty("skiko.renderApi", "OPENGL")
     systemProperty("compose.swing.render.on.graphics", "true")
 }
 
 // Дистрибутивы со встроенной Java. jpackage собирает пакет для текущей ОС.
 
-private val appVersion = "1.0.0"
-
 // jpackage берёт список библиотек из манифеста главного jar
 tasks.named<Jar>("jar") {
     val libraries = configurations.runtimeClasspath.map { files -> files.joinToString(" ") { it.name } }
     manifest {
-        attributes("Main-Class" to "wexdesktop", "Class-Path" to libraries)
+        attributes(
+            "Main-Class" to "wexdesktop",
+            "Class-Path" to libraries,
+            "Implementation-Title" to "WEX Desktop",
+            "Implementation-Version" to appVersion
+        )
     }
 }
 
@@ -157,19 +179,20 @@ val packageBinary = tasks.register<Exec>("packageBinary") {
         "--dest", outDir.absolutePath,
         // Отражение в jadx, dexlib2 и apksig ломается на урезанной Java — кладём её целиком
         "--add-modules", "ALL-MODULE-PATH",
+        // java нужен Linux-скрипту: он запускает JVM напрямую, без нативного лаунчера jpackage.
+        "--jlink-options", "--strip-debug --no-man-pages --no-header-files",
         "--java-options", "-Dskiko.renderApi=OPENGL",
         "--java-options", "-Dcompose.swing.render.on.graphics=true",
         "--java-options", "-Dawt.useSystemAAFontSettings=on",
         "--java-options", "-Dswing.aatext=true",
         "--java-options", "-Dfile.encoding=UTF-8",
         "--java-options", "-Dsun.jnu.encoding=UTF-8",
-        "--java-options", awtX11Exports,
         "--java-options", concurrentExplicitGc,
         "--java-options", heapGrowth,
         "--java-options", idleGc[0],
         "--java-options", idleGc[1]
     )
-    if (!windowsHost) options += listOf("--java-options", trimNativeHeap)
+    if (!windowsHost) options += listOf("--java-options", awtX11Exports, "--java-options", trimNativeHeap)
     if (icon.isFile) options += listOf("--icon", icon.absolutePath)
     if (windowsHost) {
         options += listOf(

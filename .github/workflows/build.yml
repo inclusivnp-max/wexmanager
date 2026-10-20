@@ -1,0 +1,110 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-37.0 build-tools;37.0.0'
+
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Install Linux test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1-mesa-dri libglx-mesa0
+
+      - name: Test and build Linux and Android
+        if: runner.os == 'Linux'
+        run: >-
+          xvfb-run -a ./gradlew :shared:desktopTest :app:packageApp :androidApp:assembleDebug
+          --no-configuration-cache --console=plain --max-workers=2
+          -Pkotlin.compiler.execution.strategy=in-process
+
+      - name: Find WiX 3
+        if: runner.os == 'Windows'
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            $wix = Get-Item "${env:ProgramFiles(x86)}\WiX Toolset v3*\bin" -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $wix) { throw 'WiX 3 was not found' }
+            $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        run: >-
+          .\gradlew.bat :app:packageApp --no-configuration-cache --console=plain
+          --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process
+
+      - name: Check launchers without opening a window
+        run: python tools/test_packaging.py
+
+      - name: Check bundled Linux runtime
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/wex-smoke"
+          tar -xzf app/build/packages/WEXdesktop-linux-x64.tar.gz -C "$RUNNER_TEMP/wex-smoke"
+          test "$("$RUNNER_TEMP/wex-smoke/WEXdesktop/start.sh" --version)" = "WEX Desktop 1.0.0"
+
+      - name: Upload desktop package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: WEXdesktop-${{ runner.os }}
+          path: |
+            app/build/packages/*.tar.gz
+            app/build/packages/*.msi
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload Android debug APK
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: WEX-Android-debug
+          path: androidApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload test reports
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results-linux
+          path: |
+            shared/build/reports/tests/desktopTest/
+            shared/build/test-results/desktopTest/
+          if-no-files-found: ignore
+          retention-days: 7

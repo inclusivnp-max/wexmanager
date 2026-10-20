@@ -65,3 +65,7 @@ local.properties
 # Журналы аварий JVM
 hs_err_pid*.log
 replay_pid*.log
+
+# Кэш проверок скриптов запуска
+__pycache__/
+*.pyc
