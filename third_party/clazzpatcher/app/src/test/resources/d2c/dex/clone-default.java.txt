@@ -1,0 +1,8 @@
+// Из art/test/856-clone: clone() массива в default-методе; d8 выносит вызов в синтетический I$0.m(Object).
+interface I {
+  default String[] myClone(String[] strings) { return strings.clone(); }
+}
+class A implements I {}
+public class Main {
+  public static void main(String[] args) { System.out.println(new A().myClone(new String[] {"x"})[0]); }
+}

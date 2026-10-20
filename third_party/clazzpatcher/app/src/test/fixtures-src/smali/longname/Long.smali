@@ -1,0 +1,13 @@
+# Класс с очень длинным простым именем (300 символов): имя файла .smali превышает 255 байт.
+.class public Lfx/ln/Looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong;
+.super Ljava/lang/Object;
+
+
+# direct methods
+.method public static f()Lfx/ln/Looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong;
+    .registers 1
+
+    const/4 v0, 0x0
+
+    return-object v0
+.end method

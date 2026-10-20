@@ -32,23 +32,19 @@
 
 ## Сборка и запуск
 
-Нужны **JDK 21**, **Android SDK 37** и исходники **clazzpatcher**.
+Нужны **JDK 21** и **Android SDK 37**.
 Android SDK требуется и при конфигурации настольной сборки: Android-модули
 подключены в общем [settings.gradle.kts](settings.gradle.kts).
 Путь к SDK задаётся через `ANDROID_HOME` или `sdk.dir` в `local.properties`.
 
-clazzpatcher подключается как отдельная Gradle-сборка с модулем
-`com.tim:clazzpatcher`. По умолчанию проект ищет его в
-`../../Tools/clazzpather-for-wex`. Другой путь можно передать при запуске:
+Исходники clazzpatcher уже находятся в [third_party/clazzpatcher/](third_party/clazzpatcher/).
+Gradle собирает их вместе с WEX; скачивать библиотеку отдельно или настраивать
+путь к ней не нужно. В каталоге сохранены её тесты, тестовые файлы и документация.
+
+Для разработки с отдельной копией библиотеки путь можно переопределить:
 
 ```bash
 ./gradlew -Pclazzpatcher.dir=/path/to/clazzpatcher :app:run
-```
-
-Чтобы не указывать путь каждый раз, добавьте в `~/.gradle/gradle.properties`:
-
-```properties
-clazzpatcher.dir=/path/to/clazzpatcher
 ```
 
 Основные команды из корня проекта:
@@ -122,6 +118,7 @@ WEX ищет эти программы в `PATH`. Они нужны для со�
 - [`shared/src/desktopTest/`](shared/src/desktopTest/) — JVM-тесты и тестовые файлы.
 - [`androidApp/`](androidApp/) — Android-приложение, разрешения и навигация.
 - [`buildSrc/`](buildSrc/) — общая логика Gradle.
+- [`third_party/clazzpatcher/`](third_party/clazzpatcher/) — исходники библиотеки DEX/smali.
 - [`gradle/libs.versions.toml`](gradle/libs.versions.toml) — версии зависимостей.
 
 Настройки настольной версии лежат в `~/.config/wexdesktop/`, кэш —

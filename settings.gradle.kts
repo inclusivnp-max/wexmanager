@@ -26,9 +26,9 @@ include(":app")
 include(":shared")
 include(":androidApp")
 
-// clazzpatcher (DEX ⇄ smali, DEX → .class) — отдельный проект рядом; путь можно переопределить свойством
-// clazzpatcher.dir. Собирается вместе с WEX тем же Kotlin, модулем com.tim:clazzpatcher.
-val clazzpatcherDir = file(providers.gradleProperty("clazzpatcher.dir").getOrElse("../../Tools/clazzpather-for-wex"))
+// DEX ⇄ smali и DEX → .class. По умолчанию собираем включённые исходники;
+// clazzpatcher.dir позволяет подключить отдельную рабочую копию.
+val clazzpatcherDir = file(providers.gradleProperty("clazzpatcher.dir").getOrElse("third_party/clazzpatcher"))
 includeBuild(clazzpatcherDir) {
     dependencySubstitution {
         substitute(module("com.tim:clazzpatcher")).using(project(":app"))

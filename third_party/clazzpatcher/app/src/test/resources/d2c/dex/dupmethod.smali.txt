@@ -1,0 +1,23 @@
+.class LTest;
+.super Ljava/lang/Object;
+.source "Test.j"
+
+
+# direct methods
+.method public static run()Ljava/lang/Object;
+    .registers 1
+
+    new-instance v0, Ljava/lang/Object;
+
+    invoke-direct {v0}, Ljava/lang/Object;-><init>()V
+
+    return-object v0
+.end method
+
+.method public static run()Ljava/lang/Object;
+    .registers 1
+
+    const/4 v0, 0x0
+
+    return-object v0
+.end method

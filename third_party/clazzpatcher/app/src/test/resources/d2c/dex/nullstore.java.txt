@@ -1,0 +1,10 @@
+import java.lang.ref.WeakReference;
+public class Main {
+    public static void main(String[] a) {
+        Object o = new byte[1 << 20];
+        WeakReference<Object> w = new WeakReference<>(o);
+        o = null;
+        System.gc();
+        System.out.println(w.get() == null ? "collected" : "retained");
+    }
+}
