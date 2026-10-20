@@ -111,6 +111,9 @@ tasks.withType<Test>().configureEach {
 
 tasks.withType<JavaExec>().configureEach {
     val nativeEnvCopy = nativeEnv.toMap()
+    if (System.getProperty("os.name").startsWith("Linux", ignoreCase = true)) {
+        jvmArgs(application.applicationDefaultJvmArgs + listOf(awtX11Exports, trimNativeHeap))
+    }
     nativeEnvCopy.forEach { (key, default) ->
         val original = System.getenv(key)
         if (System.getenv("WEX_ORIG_$key") == null) {
@@ -154,7 +157,7 @@ val packageBinary = tasks.register<Exec>("packageBinary") {
     dependsOn(packageLibs)
 
     val jpackage = javaToolchains.launcherFor(java.toolchain).get()
-        .metadata.installationPath.file("bin/jpackage").asFile.absolutePath
+        .metadata.installationPath.file(if (windowsHost) "bin/jpackage.exe" else "bin/jpackage").asFile.absolutePath
     val input = layout.buildDirectory.dir("packageLibs").get().asFile
     val outDir = layout.buildDirectory.dir("packages").get().asFile
     val icon = project.file(

@@ -49,7 +49,6 @@ jobs:
         run: >-
           xvfb-run -a ./gradlew :shared:desktopTest :app:packageApp :androidApp:assembleDebug
           --no-configuration-cache --console=plain --max-workers=2
-          -Pkotlin.compiler.execution.strategy=in-process
 
       - name: Find WiX 3
         if: runner.os == 'Windows'
@@ -65,7 +64,7 @@ jobs:
         if: runner.os == 'Windows'
         run: >-
           .\gradlew.bat :app:packageApp --no-configuration-cache --console=plain
-          --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process
+          --max-workers=2
 
       - name: Check launchers without opening a window
         run: python tools/test_packaging.py
