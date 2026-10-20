@@ -44,6 +44,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb libgl1-mesa-dri libglx-mesa0
 
+      - name: Select Chrome for headless integration tests
+        if: runner.os == 'Linux'
+        run: |
+          browser=$(command -v google-chrome-stable || command -v google-chrome)
+          "$browser" --version
+          mkdir -p "$RUNNER_TEMP/wex-bin"
+          printf '#!/bin/sh\nexec "%s" --no-sandbox "$@"\n' "$browser" > "$RUNNER_TEMP/wex-bin/chromium"
+          chmod +x "$RUNNER_TEMP/wex-bin/chromium"
+          echo "$RUNNER_TEMP/wex-bin" >> "$GITHUB_PATH"
+
       - name: Test and build Linux and Android
         if: runner.os == 'Linux'
         run: >-

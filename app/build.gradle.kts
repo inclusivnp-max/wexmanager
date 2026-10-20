@@ -92,6 +92,8 @@ application {
         "-Dswing.aatext=true",
         // Пути с кириллицей/иероглифами и буфер обмена не должны зависеть от локали запуска
         "-Dfile.encoding=UTF-8",
+        "-Dstdout.encoding=UTF-8",
+        "-Dstderr.encoding=UTF-8",
         "-Dsun.jnu.encoding=UTF-8",
         concurrentExplicitGc,
         heapGrowth
@@ -189,6 +191,8 @@ val packageBinary = tasks.register<Exec>("packageBinary") {
         "--java-options", "-Dawt.useSystemAAFontSettings=on",
         "--java-options", "-Dswing.aatext=true",
         "--java-options", "-Dfile.encoding=UTF-8",
+        "--java-options", "-Dstdout.encoding=UTF-8",
+        "--java-options", "-Dstderr.encoding=UTF-8",
         "--java-options", "-Dsun.jnu.encoding=UTF-8",
         "--java-options", concurrentExplicitGc,
         "--java-options", heapGrowth,

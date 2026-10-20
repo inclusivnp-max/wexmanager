@@ -73,16 +73,23 @@ class PasteChunksTest {
         s.start()
         try {
             assertTrue(waitFor(5000) { s.isAlive })
-            s.sendText("export PS1='$ '\r")
-            assertTrue(waitFor(5000) { s.bracketedPaste })
+            // Ждём именно новое приглашение: bracketedPaste мог остаться от начального PS1.
+            s.sendText("export PS1=\"wex-\$((6*7))> \"\r")
+            assertTrue(waitFor(5000) { s.bracketedPaste && screen(s).contains("wex-42>") })
             // Шесть мегабайт readline разбирает секунд двадцать; без отмены ответ ждал бы их все
             val text = (1..100_000).joinToString("\n") { "echo line $it abcdefghijklmnopqrstuvwxyz 0123456789 ABCDEFGHIJ" }
             val started = System.currentTimeMillis()
             s.paste(text)
             Thread.sleep(200)
             s.sendBytes(byteArrayOf(3))
+            val deadline = System.nanoTime() + 8_000_000_000L
+            fun remainingMs() = ((deadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+            // Bash сбрасывает ввод при SIGINT. Команду отправляем после нового PS1, в тот же лимит 8 с.
+            assertTrue(waitFor(remainingMs()) {
+                screen(s).substringAfterLast("^C", "").trimEnd().endsWith("wex-42>")
+            }, screen(s))
             s.sendText("echo done-\$((6*7))\r")
-            assertTrue(waitFor(8000) { screen(s).contains("done-42") }, screen(s))
+            assertTrue(waitFor(remainingMs()) { screen(s).contains("done-42") }, screen(s))
             println("оболочка ответила через ${System.currentTimeMillis() - started} мс после вставки")
         } finally {
             s.close()

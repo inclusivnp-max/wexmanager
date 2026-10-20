@@ -102,6 +102,7 @@ class DistributionTests(unittest.TestCase):
     def test_help_without_display(self):
         result = self.launcher("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("файловый менеджер", result.stdout)
         self.assertIn("--background", result.stdout)
         self.assertIn("--version", result.stdout)
 
