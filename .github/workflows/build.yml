@@ -42,7 +42,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libgl1-mesa-dri libglx-mesa0
+          sudo apt-get install -y xvfb libgl1-mesa-dri libglx-mesa0 poppler-utils
 
       - name: Select Chrome for headless integration tests
         if: runner.os == 'Linux'
@@ -114,6 +114,7 @@ jobs:
           name: test-results-linux
           path: |
             shared/build/reports/tests/desktopTest/
+            shared/build/reports/pdf-reader/
             shared/build/test-results/desktopTest/
           if-no-files-found: ignore
           retention-days: 7

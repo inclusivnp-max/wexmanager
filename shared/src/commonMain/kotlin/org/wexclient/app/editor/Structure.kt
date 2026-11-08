@@ -547,6 +547,12 @@ object OutlineEngine {
         mapOf(
             "kotlin" to kotlin, "java" to java, "c" to cLike, "cpp" to cLike, "objc" to cLike, "glsl" to cLike,
             "d" to cLike + java, "odin" to cLike, "javascript" to js, "typescript" to js, "qml" to qml,
+            "wex" to listOf(
+                Rule(Regex("^\\s*(?:export\\s+)?fn\\s+([A-Za-z_]\\w*)\\s*\\(([^)]*)"), ItemKind.FUNCTION, 1, 2),
+                Rule(Regex("^\\s*(const)\\s+([A-Za-z_]\\w*)"), ItemKind.CONSTANT, 2),
+                Rule(Regex("^\\s*var\\s+([A-Za-z_]\\w*)"), ItemKind.VARIABLE),
+                Rule(Regex("^\\s*import\\s+([A-Za-z_]\\w*)"), ItemKind.MODULE)
+            ),
             "python" to python, "pine" to pine, "go" to go, "rust" to rust, "shell" to shell, "lua" to lua, "ruby" to ruby,
             "crystal" to ruby, "php" to php, "csharp" to csharp, "swift" to swift, "dart" to dart, "scala" to scala,
             "groovy" to groovy, "sql" to sql, "css" to css, "scss" to css, "makefile" to make, "dockerfile" to docker,

@@ -36,6 +36,9 @@ expect fun PointerEvent.clickCount(): Int
 /** Курсор «тянуть по горизонтали» — у разделителя панелей. */
 expect val ResizeHorizontalPointerIcon: PointerIcon
 
+/** Курсор изменения ширины и высоты окна подсказок. */
+expect val ResizeDiagonalPointerIcon: PointerIcon
+
 // Просмотрщики, у которых декодирование своё на каждой платформе (Skia/ffmpeg/poppler — android.graphics/MediaPlayer/PdfRenderer)
 
 @Composable

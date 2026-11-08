@@ -148,14 +148,45 @@ class FilePaneState(
     /** Курсор на первый из появившихся элементов, прокрутка к ним и подсветка всех. */
     fun revealArrived(names: Collection<String>) = whenLoaded { revealArrivedNow(names) }
 
-    private fun revealArrivedNow(names: Collection<String>) {
+    internal fun acknowledgeReveal(request: RevealRequest) {
+        if (revealRequest === request) revealRequest = null
+    }
+
+    private fun revealArrivedNow(names: Collection<String>, immediate: Boolean = false) {
         val wanted = names.toSet()
         val indices = entries.indices.filter { entries[it].name in wanted }
         if (indices.isEmpty()) return
         focusedIndex = indices.first()
         arrivedIn = currentPath
         arrivedNames = wanted
-        revealRequest = RevealRequest(indices.first(), indices.last())
+        revealRequest = RevealRequest(indices.first(), indices.last(), immediate)
+    }
+
+    private var revealedFile: Path? = null
+    private var revealVersion = 0
+
+    /** Показать конкретный файл: поиск и фильтр не должны прятать цель перехода. */
+    fun revealFile(file: Path) {
+        val target = vfsManager.live(file.toAbsolutePath().normalize())
+        val parent = target.parent ?: return
+        val version = ++revealVersion
+        revealedFile = target
+        arrivedNames = emptySet()
+        recentlyReturnedChildName = null
+        revealRequest = null
+        isSearchOpen = false
+        searchQuery = ""
+        typeFilter = TypeFilter.ALL
+        clearSelection()
+        if (currentPath == parent) refresh() else navigateTo(parent)
+        val navigation = navigationId
+        whenLoaded {
+            if (version != revealVersion || navigation != navigationId || currentPath != parent) return@whenLoaded
+            val entry = entries.firstOrNull { it.path == target } ?: return@whenLoaded
+            clearSelection()
+            toggleSelection(entry)
+            revealArrivedNow(listOf(entry.name), immediate = true)
+        }
     }
 
     // History for back/forward
@@ -790,6 +821,7 @@ class FilePaneState(
         leaving = snapshot
         navigationId++
         currentPath = newPath
+        if (revealedFile?.parent != newPath) revealedFile = null
         clearSelection()
         clearTypeAhead()
         searchQuery = ""
@@ -1003,6 +1035,7 @@ class FilePaneState(
     /** Что влияет на порядок и состав списка — снимок для сортировки в фоне. */
     private class Arrangement(
         val showHidden: Boolean,
+        val revealedName: String?,
         val filter: TypeFilter,
         val naturalSort: Boolean,
         val foldersFirst: Boolean,
@@ -1013,6 +1046,7 @@ class FilePaneState(
 
     private fun arrangement() = Arrangement(
         showHidden = ViewPreferences.showHidden,
+        revealedName = revealedFile?.takeIf { it.parent == currentPath }?.fileName?.toString(),
         filter = typeFilter,
         naturalSort = ViewPreferences.naturalSort,
         foldersFirst = ViewPreferences.foldersFirst,
@@ -1116,7 +1150,7 @@ class FilePaneState(
         private const val REVALIDATE_DELAY_MS = 350L
 
         private fun arrange(listed: List<VfsEntry>, a: Arrangement): List<VfsEntry> {
-            val filtered = listed.filter { e -> (a.showHidden || !e.name.startsWith(".")) && a.filter.accepts(e) }
+            val filtered = listed.filter { e -> (a.showHidden || e.name == a.revealedName || !e.name.startsWith(".")) && a.filter.accepts(e) }
             val hasAndroidPackageFiles = a.insideArchive || filtered.any {
                 val n = it.name
                 n.equals("androidmanifest.xml", ignoreCase = true) || n.endsWith(".dex", ignoreCase = true) ||
@@ -1249,7 +1283,7 @@ class FilePaneState(
 }
 
 /** Диапазон индексов в списке, который нужно показать (сравнение по ссылке — каждый запрос новый). */
-class RevealRequest(val first: Int, val last: Int)
+class RevealRequest(val first: Int, val last: Int, val immediate: Boolean = false)
 
 /** Файл открывается в фоне: рядом с именем в списке — полоска прогресса. */
 class OpeningFile(val path: Path) {

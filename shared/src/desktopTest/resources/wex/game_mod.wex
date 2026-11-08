@@ -1,0 +1,47 @@
+// WexLanguage - Android Mod Menu & Offset Manipulation Script (.wex)
+import memory;
+import gui;
+
+log("Initializing Wex Mod Engine...");
+
+// 1. Resolve Target Game Module Base
+var il2cpp_base = memory.find_module("libil2cpp.so");
+log("libil2cpp.so Base Address: " + il2cpp_base);
+
+// 2. Offsets Configuration
+const OFFSET_PLAYER_HEALTH = 0x01A3F400;
+const OFFSET_PLAYER_SPEED  = 0x01A3F440;
+const OFFSET_SAFETY_GATE   = 0x0218A9E0;
+
+// 3. Runtime State
+var override_enabled = true;
+var speed_multiplier = 2.5;
+
+// 4. Memory Patching Routine
+if (override_enabled) {
+    // ARM64 NOP opcode: 0xD503201F
+    log("Applying NOP patch to validation pipeline...");
+    memory.patch(il2cpp_base + OFFSET_SAFETY_GATE, "1F 20 03 D5");
+    log("Patch applied successfully!");
+}
+
+// 5. Draw In-Game Floating Overlay Menu
+gui.begin("Wex Diagnostic Hub v1.0 [Enterprise]", 450.0, 320.0);
+gui.text("Game: libil2cpp.so");
+gui.text("Status: Injected & Protected by WexVM");
+gui.separator();
+
+override_enabled = gui.checkbox("Validation Bypass (SafeMode)", override_enabled);
+speed_multiplier = gui.slider("Player Speed Multiplier", speed_multiplier, 1.0, 10.0);
+
+if (gui.button("Reset Coordinate Cache")) {
+    log("Relocating coordinate cache...");
+    var target_coord_addr = il2cpp_base + OFFSET_PLAYER_SPEED;
+    memory.write_float(target_coord_addr, 500.0);
+}
+
+gui.separator();
+gui.text("Reverse Engineering Defense: ACTIVE");
+gui.end();
+
+log("Mod tick execution completed.");

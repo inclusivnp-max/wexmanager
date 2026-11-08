@@ -213,6 +213,7 @@ internal object FileProperties {
             VfsItemType.CODE_GO -> "Код Go"
             VfsItemType.CODE_CSS -> "Стили CSS"
             VfsItemType.CODE_HTML -> "Страница HTML"
+            VfsItemType.CODE_WEX -> "Код WEX"
             VfsItemType.CODE_PINE -> "Pine Script"
             VfsItemType.CODE_SQL -> "Запрос SQL"
             VfsItemType.CODE_RUBY -> "Код Ruby"

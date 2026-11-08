@@ -1,0 +1,14 @@
+// WexLanguage - Basic Test Script (.wex)
+var a = 10;
+var b = 25;
+var result = (a + b) * 2;
+
+log("WexLanguage Core Online!");
+log("Result of calculation: " + result);
+
+var is_protected = true;
+if (is_protected) {
+    log("Status: Anti-reverse virtual machine is operational.");
+} else {
+    log("Status: Inactive");
+}

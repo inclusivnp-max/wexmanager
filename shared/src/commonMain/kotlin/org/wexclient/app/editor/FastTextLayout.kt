@@ -75,8 +75,8 @@ internal class ShownLine(
 
 /**
  * Раскладка документа по экранным строкам. Без переноса каждая строка занимает одну экранную,
- * и всё считается умножением. С переносом ширина строки известна заранее (моноширинный шрифт),
- * поэтому число экранных строк — деление, а начала хранятся суммами с накоплением.
+ * и всё считается умножением. При переносе храним границы слов в длинных строках
+ * и накопленные номера экранных строк; рисование и ввод используют одни границы.
  */
 internal class FastLayout(
     val snapshot: HighlightSnapshot,
@@ -85,7 +85,8 @@ internal class FastLayout(
     /** Ширина окна в знаках; 0 или меньше — перенос выключен. */
     val columns: Int,
     /** Свёрнутые участки текста: их строки не показываются (кроме первой — с меткой). */
-    val collapsed: List<IntRange> = emptyList()
+    val collapsed: List<IntRange> = emptyList(),
+    private val measuredWidths: IntArray? = null
 ) {
     val wrap: Boolean = columns > 0
 
@@ -113,6 +114,32 @@ internal class FastLayout(
     /** Строка спрятана свёрткой. */
     fun isHidden(line: Int): Boolean = hidden?.getOrNull(line) == true
 
+    private val wrapped = HashMap<Int, IntArray>()
+
+    private fun breaks(line: Int): IntArray = wrapped.getOrPut(line) {
+        val value = shownLine(line).text
+        val ends = ArrayList<Int>()
+        ends.add(0)
+        var start = 0
+        while (start < value.length) {
+            var end = min(value.length, start + columns)
+            if (end < value.length) {
+                var boundary = end
+                while (boundary > start && !value[boundary - 1].isWhitespace() && value[boundary - 1] !in "-/") boundary--
+                if (boundary > start && (start until boundary).any { !value[it].isWhitespace() }) end = boundary
+                // Не разрезаем UTF-16 пару или хвост комбинируемого знака.
+                if (end < value.length && end > start && Character.isLowSurrogate(value[end]) && Character.isHighSurrogate(value[end - 1])) end--
+                if (end == start) end = min(value.length, start + 2)
+                while (end < value.length && (Character.getType(value[end]) in MARK_TYPES || value[end] == '\u200D' || value[end - 1] == '\u200D')) {
+                    end += if (Character.isHighSurrogate(value[end]) && end + 1 < value.length && Character.isLowSurrogate(value[end + 1])) 2 else 1
+                }
+            }
+            ends.add(end)
+            start = end
+        }
+        ends.toIntArray()
+    }
+
     /** rowStart[i] — номер первой экранной строки для строки i (нужен при переносе и свёртках). */
     private val rowStart: IntArray? = if (!wrap && hidden == null) null else IntArray(snapshot.lineCount + 1).also { arr ->
         var row = 0
@@ -128,13 +155,17 @@ internal class FastLayout(
     private fun rowsOfLine(line: Int): Int = when {
         isHidden(line) -> 0
         !wrap -> 1
-        else -> rowsOfWidth(widthOf(line))
+        widthOf(line) <= columns -> 1
+        else -> breaks(line).size - 1
     }
-
-    private fun rowsOfWidth(width: Int): Int = if (!wrap) 1 else max(1, (width + columns - 1) / columns)
 
     /** Ширина строки в колонках — без разворачивания, если табов нет. */
     private fun widthOf(line: Int): Int {
+        measuredWidths?.let { return it[line] }
+        return visualWidth(snapshot, line, tabSize)
+    }
+
+    internal fun visualWidth(snapshot: HighlightSnapshot, line: Int, tabSize: Int): Int {
         val start = snapshot.lineStart(line)
         val end = snapshot.lineEnd(line)
         if (end <= start) return 0
@@ -182,41 +213,55 @@ internal class FastLayout(
         return lo
     }
 
-    /** Экранная строка и колонка в ней для позиции в тексте. */
-    fun rowAndColumn(offset: Int): Pair<Int, Int> {
-        val snap = snapshot
-        val safe = offset.coerceIn(0, snap.text.length)
-        val line = snap.lineOf(safe)
-        val column = shownLine(line).columnOf(safe - snap.lineStart(line))
-        if (!wrap) return firstRowOf(line) to column
-        val row = column / columns
-        // Конец строки ровно на границе переноса: такой экранной строки нет, каретка стоит в конце
-        // последней. Раньше она рисовалась в начале следующей строки текста
-        if (row > 0 && row >= rowsOf(line)) return (firstRowOf(line) + row - 1) to columns
-        return (firstRowOf(line) + row) to (column % columns)
+    /** Экранная строка и колонка; одинаковое смещение на стыке допускает каретку в конце предыдущей строки. */
+    fun rowAndColumn(offset: Int, previousRow: Boolean = false): Pair<Int, Int> {
+        val safe = offset.coerceIn(0, snapshot.text.length)
+        val line = snapshot.lineOf(safe)
+        val column = shownLine(line).columnOf(safe - snapshot.lineStart(line))
+        if (!wrap || rowsOf(line) == 1) return firstRowOf(line) to column
+        val points = breaks(line)
+        var low = 0
+        var high = points.lastIndex - 1
+        while (low < high) {
+            val middle = (low + high + 1) ushr 1
+            if (points[middle] <= column) low = middle else high = middle - 1
+        }
+        if (previousRow && low > 0 && points[low] == column) low--
+        return firstRowOf(line) + low to column - points[low]
     }
 
-    /** Позиция в тексте для экранной строки и колонки. */
+    /** Колонки только данной экранной строки: длинная желаемая колонка не перепрыгивает перенос. */
     fun offsetAt(row: Int, column: Int): Int {
-        val snap = snapshot
-        if (snap.lineCount == 0) return 0
-        val line = lineOfRow(row.coerceAtLeast(0))
-        val shownLine = shownLine(line)
-        val inLineRow = if (wrap) (row - firstRowOf(line)).coerceAtLeast(0) else 0
-        val wanted = if (wrap) inLineRow * columns + column else column
-        val start = snap.lineStart(line)
-        val len = max(0, snap.lineEnd(line) - start)
-        return start + shownLine.offsetOf(wanted).coerceIn(0, len)
+        if (snapshot.lineCount == 0) return 0
+        val safeRow = row.coerceIn(0, max(0, totalRows - 1))
+        val line = lineOfRow(safeRow)
+        val shown = shownLine(line)
+        val range = sliceOf(line, safeRow)
+        val wanted = (range.first.toLong() + column.coerceAtLeast(0)).coerceAtMost(range.last.toLong()).toInt()
+        val start = snapshot.lineStart(line)
+        var offset = start + shown.offsetOf(wanted).coerceIn(0, snapshot.lineEnd(line) - start)
+        if (offset > start && offset < snapshot.text.length && Character.isLowSurrogate(snapshot.text[offset]) && Character.isHighSurrogate(snapshot.text[offset - 1])) offset--
+        return offset
     }
 
-    /** Кусок строки, который виден в экранной строке [row]. */
+    /** Конец диапазона исключающий (тот же контракт, что у substring). */
     fun sliceOf(line: Int, row: Int): IntRange {
-        if (!wrap) return 0..shownLine(line).text.length
-        val inLineRow = (row - firstRowOf(line)).coerceAtLeast(0)
-        val from = inLineRow * columns
-        val to = min(shownLine(line).text.length, from + columns)
-        return from..max(from, to)
+        val shown = shownLine(line)
+        if (!wrap || rowsOf(line) == 1) return 0..shown.text.length
+        val points = breaks(line)
+        val part = (row - firstRowOf(line)).coerceIn(0, points.lastIndex - 1)
+        return points[part]..points[part + 1]
     }
+
+    fun rowWidth(row: Int): Int {
+        val range = sliceOf(lineOfRow(row), row)
+        return range.last - range.first
+    }
+
+    companion object {
+        private val MARK_TYPES = setOf(Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt())
+    }
+
 }
 
 /** Строка с подсветкой: спаны только на эту строку, слишком длинную обрезаем. */

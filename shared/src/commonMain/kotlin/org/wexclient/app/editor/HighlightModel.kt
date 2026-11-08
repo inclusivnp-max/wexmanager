@@ -222,6 +222,7 @@ class HighlightModel(language: Language) {
         if (text.length <= maxLexChars) {
             var state = 0
             for (line in 0 until count) {
+                stopIfInterrupted(line)
                 inStates[line] = state
                 state = lex(line, state)
                 outStates[line] = state

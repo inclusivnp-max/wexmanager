@@ -324,15 +324,9 @@ fun FilePaneView(
 
     // Результат поиска: закрыть поиск, открыть его папку и выделить сам элемент
     fun revealInFolder(entry: VfsEntry) {
-        val parent = entry.path.parent ?: return
-        state.isSearchOpen = false
-        if (state.vfsManager.live(parent) == state.vfsManager.live(state.currentPath)) {
-            state.searchQuery = ""
-            state.refresh()
-        } else {
-            state.navigateTo(parent)
-        }
-        state.whenLoaded { focusFound(entry) }
+        state.revealFile(entry.path)
+        onActivate()
+        onReturnFocus?.invoke()
     }
 
     fun runScript(entry: VfsEntry) {
@@ -1490,39 +1484,36 @@ fun FilePaneView(
                                 .collect { if (it > 2) state.pageRows = it - 1 }
                         }
 
-                        // Курсор ушёл за край — плавно показать. Индекс читается потоком, а не ключом эффекта:
-                        // ключ читался в композиции, и каждая стрелка перекомпоновывала всю страницу списка
-                        // state в ключе: при смене вкладки с тем же navigationId AnimatedContent оставляет эту
-                        // страницу, и эффект иначе продолжал бы следить за прежней вкладкой
+                        // Один владелец прокрутки: переход к файлу не спорит с анимацией курсора.
                         LaunchedEffect(state, listState, live) {
-                            androidx.compose.runtime.snapshotFlow { state.focusedIndex }.collectLatest { focused ->
-                                if (live && focused in state.entries.indices) {
-                                    val target = if (state.canGoUp) focused + 1 else focused
+                            if (!live) return@LaunchedEffect
+                            var lastFocused = -1
+                            snapshotFlow { state.focusedIndex to state.revealRequest }.collectLatest { (focused, request) ->
+                                val focusChanged = focused != lastFocused
+                                lastFocused = focused
+                                val shift = if (state.canGoUp) 1 else 0
+                                if (request != null) {
+                                    androidx.compose.runtime.withFrameNanos { }
+                                    val first = request.first + shift
+                                    val last = request.last + shift
+                                    val layout = listState.layoutInfo
+                                    fun shown(index: Int) = layout.visibleItemsInfo.any {
+                                        it.index == index && it.offset >= layout.viewportStartOffset &&
+                                            it.offset + it.size <= layout.viewportEndOffset - layout.afterContentPadding
+                                    }
+                                    if (!shown(first) || !shown(last)) {
+                                        val target = (first - 2).coerceAtLeast(0)
+                                        if (request.immediate) listState.scrollToItem(target) else listState.animateScrollToItem(target)
+                                    }
+                                    state.acknowledgeReveal(request)
+                                } else if (focusChanged && focused in state.entries.indices) {
+                                    val target = focused + shift
                                     val visible = listState.layoutInfo.visibleItemsInfo
                                     if (visible.isNotEmpty() && visible.none { it.index == target }) {
                                         listState.animateScrollToItem((target - 2).coerceAtLeast(0))
                                     }
                                 }
                             }
-                        }
-
-                        // Плавно показать то, что только что сюда скопировали или переместили
-                        LaunchedEffect(state.revealRequest) {
-                            if (!live) return@LaunchedEffect
-                            val request = state.revealRequest ?: return@LaunchedEffect
-                            // Раскладка с новыми элементами — со следующего кадра
-                            androidx.compose.runtime.withFrameNanos { }
-                            val shift = if (state.canGoUp) 1 else 0
-                            val first = request.first + shift
-                            val last = request.last + shift
-                            val layout = listState.layoutInfo
-                            fun shown(index: Int) = layout.visibleItemsInfo.any {
-                                it.index == index && it.offset >= layout.viewportStartOffset &&
-                                    it.offset + it.size <= layout.viewportEndOffset - layout.afterContentPadding
-                            }
-                            if (shown(first) && shown(last)) return@LaunchedEffect
-                            // Два элемента над первым новым — чтобы было видно, куда он встал
-                            listState.animateScrollToItem((first - 2).coerceAtLeast(0))
                         }
 
                         // Полоса прокрутки списка: в покое — тонкая нить, под курсором расширяется

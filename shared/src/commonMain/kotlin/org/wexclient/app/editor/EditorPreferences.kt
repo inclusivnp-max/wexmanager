@@ -31,6 +31,10 @@ object EditorPreferences {
     /** Подсказки всплывают при вводе (иначе — только Ctrl+Space). */
     var autoPopup by mutableStateOf(true)
         private set
+    var completionWidthDp by mutableStateOf(CompletionPopupSizing.DEFAULT_WIDTH)
+        private set
+    var completionHeightDp by mutableStateOf(CompletionPopupSizing.DEFAULT_HEIGHT)
+        private set
     var autoClose by mutableStateOf(true)
         private set
     var tabSize by mutableStateOf(4)
@@ -74,6 +78,12 @@ object EditorPreferences {
             stickyHeaders = bool("stickyHeaders", stickyHeaders)
             highlightCurrentLine = bool("highlightCurrentLine", highlightCurrentLine)
             autoPopup = bool("autoPopup", autoPopup)
+            val completionSize = CompletionPopupSizing.preferred(
+                props.getProperty("completionWidthDp")?.toFloatOrNull() ?: completionWidthDp,
+                props.getProperty("completionHeightDp")?.toFloatOrNull() ?: completionHeightDp
+            )
+            completionWidthDp = completionSize.width.value
+            completionHeightDp = completionSize.height.value
             autoClose = bool("autoClose", autoClose)
             showOutline = bool("showOutline", showOutline)
             diagnostics = bool("diagnostics", diagnostics)
@@ -106,6 +116,14 @@ object EditorPreferences {
     fun updateStickyHeaders(v: Boolean) { stickyHeaders = v; save() }
     fun updateHighlightCurrentLine(v: Boolean) { highlightCurrentLine = v; save() }
     fun updateAutoPopup(v: Boolean) { autoPopup = v; save() }
+    fun updateCompletionSize(widthDp: Float, heightDp: Float) {
+        val size = CompletionPopupSizing.preferred(widthDp, heightDp)
+        if (completionWidthDp == size.width.value && completionHeightDp == size.height.value) return
+        completionWidthDp = size.width.value
+        completionHeightDp = size.height.value
+        save()
+    }
+
     fun updateAutoClose(v: Boolean) { autoClose = v; save() }
     fun updateTabSize(v: Int) { tabSize = v.coerceIn(1, 16); save() }
     fun updateShowOutline(v: Boolean) { showOutline = v; save() }
@@ -127,6 +145,8 @@ object EditorPreferences {
             props.setProperty("stickyHeaders", stickyHeaders.toString())
             props.setProperty("highlightCurrentLine", highlightCurrentLine.toString())
             props.setProperty("autoPopup", autoPopup.toString())
+            props.setProperty("completionWidthDp", completionWidthDp.toString())
+            props.setProperty("completionHeightDp", completionHeightDp.toString())
             props.setProperty("autoClose", autoClose.toString())
             props.setProperty("tabSize", tabSize.toString())
             props.setProperty("showOutline", showOutline.toString())

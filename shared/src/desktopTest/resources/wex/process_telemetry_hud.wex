@@ -1,0 +1,66 @@
+// WexLanguage - Process Diagnostic & Visual Telemetry HUD (.wex)
+import memory;
+import gui;
+
+log("===============================================");
+log("  WEX RUNTIME DIAGNOSTICS & TELEMETRY ENGINE   ");
+log("===============================================");
+
+// 1. Process Introspection
+var my_pid = process.pid();
+log("Current Process PID: " + my_pid);
+
+var libc_base = memory.find_module("libc.so");
+log("libc.so Base Address: " + hex(libc_base));
+
+// 2. Dynamic Process Scratch Allocation
+log("Allocating 4096 bytes of executable memory...");
+var scratch_buffer = memory.alloc(4096);
+log("Scratch Buffer Allocated at: " + hex(scratch_buffer));
+
+// Write diagnostic test pattern into memory
+memory.write_u32(scratch_buffer + 0x00, 0x41424344);
+memory.write_u32(scratch_buffer + 0x04, 0xCAFEBABE);
+memory.write_float(scratch_buffer + 0x08, 144.0);
+
+// Hex dump memory inspection
+log("Inspecting memory contents of scratch buffer:");
+memory.dump(scratch_buffer, 32);
+
+// 3. Visual Telemetry HUD & Performance Dashboard
+gui.begin("Wex Engine Diagnostics & Profiler", 480.0, 360.0);
+gui.text("Host Process PID: " + my_pid);
+gui.text("Base Module: libc.so (" + hex(libc_base) + ")");
+gui.separator();
+
+// Performance & Metric Progress Bars
+gui.text("Memory Usage Profile:");
+gui.progress(0.72, "Allocated: 72% [3.2 MB / 4.0 MB]");
+
+gui.separator();
+
+var profiling_active = gui.checkbox("Real-time GPU Hook", true);
+var target_fps = gui.slider("Target Frame Rate", 120.0, 30.0, 240.0);
+
+if (gui.button("Trigger Memory Garbage Collection")) {
+    log("Flushing heap caches...");
+}
+
+gui.separator();
+gui.text("Canvas HUD Primitives:");
+gui.end();
+
+// 4. 2D Visual Drawing Primitives (Canvas / HUD)
+log("Rendering 2D Canvas Visuals...");
+// Draw bounding box (x, y, w, h, color)
+gui.draw_rect(100.0, 150.0, 240.0, 180.0, 0x00FF00);
+
+// Draw crosshair / tracer line
+gui.draw_line(0.0, 0.0, 220.0, 240.0, 0x00FFFF);
+
+// Floating HUD text overlay
+gui.draw_text(105.0, 155.0, "CPU Core: 98% | GLES 3.2 Active", 0xFFFFFF);
+
+// Free allocated buffer when done
+memory.free(scratch_buffer, 4096);
+log("Diagnostic cycle finished cleanly.");

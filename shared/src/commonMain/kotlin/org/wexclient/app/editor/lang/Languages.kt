@@ -868,6 +868,12 @@ object Languages {
         vocabularyFactory = { LanguageData.python() }
     )
 
+    val WEX = Language(
+        "wex", "WEX", ext("wex"), lineComment = "//", blockComment = "/*" to "*/",
+        autoPairs = "()[]{}\"\"", indentAfter = Regex("[{\\[(]\\s*(?://.*)?$"),
+        spec = WexSupport.spec, lexerFactory = { WexLexer }, vocabularyFactory = { WexSupport.vocabulary() }
+    )
+
     val PINE = Language(
         "pine", "Pine Script", ext("pine pinescript"),
         lineComment = "//",
@@ -1158,7 +1164,7 @@ object Languages {
 
     val all: List<Language> = listOf(
         PLAIN, SMALI, JVM_BYTECODE, JAVA, KOTLIN, GROOVY, SCALA, XML, HTML, CSS, SCSS, JSON, YAML, TOML, INI, PROPERTIES, DOTENV,
-        MARKDOWN, PYTHON, PINE, JAVASCRIPT, TYPESCRIPT, QML, C, CPP, OBJC, CSHARP, GO, RUST, SWIFT, DART, LUA, RUBY, CRYSTAL,
+        MARKDOWN, PYTHON, WEX, PINE, JAVASCRIPT, TYPESCRIPT, QML, C, CPP, OBJC, CSHARP, GO, RUST, SWIFT, DART, LUA, RUBY, CRYSTAL,
         PHP, PERL, SHELL, FISH, POWERSHELL, BATCH, SQL, KDL, MAKEFILE, CMAKE, DOCKERFILE, NIX, HASKELL, OCAML,
         ELIXIR, ERLANG, CLOJURE, R, JULIA, ZIG, NIM, D, PASCAL, VB, ASM, GLSL, PROTOBUF, GRAPHQL, HCL, SOLIDITY,
         AWK, TCL, VIM, MESON, ODIN, PROGUARD, LOG, CSV, TSV, LATEX, DIFF, IGNORE

@@ -90,7 +90,7 @@ fun FileIconBadge(
         } else {
             Icon(
                 imageVector = icon,
-                contentDescription = null,
+                contentDescription = if (type == VfsItemType.CODE_WEX) "Файл WEX" else null,
                 tint = color,
                 modifier = Modifier.size(20.dp)
             )
@@ -146,6 +146,7 @@ private fun getIconAndColor(type: VfsItemType): Pair<ImageVector, Color> {
         VfsItemType.CODE_GO -> Pair(Icons.Default.Pets, Color(0xFF00ADD8)) // Go — суслик, фирменная бирюза
         VfsItemType.CODE_CSS -> Pair(Icons.Default.Css, Color(0xFF60A5FA)) // CSS Blue
         VfsItemType.CODE_HTML -> Pair(Icons.Default.Html, Color(0xFFFB7A45)) // HTML Orange
+        VfsItemType.CODE_WEX -> Pair(WexFileIcon, NoctaliaPrimary)
         VfsItemType.CODE_PINE -> Pair(Icons.Default.Park, Color(0xFF26C281)) // Pine Script — ёлка
         VfsItemType.CODE_SQL -> Pair(Icons.Default.Schema, Color(0xFFEAB308)) // Запросы SQL
         VfsItemType.CODE_RUBY -> Pair(Icons.Default.Diamond, Color(0xFFEF4444)) // Ruby — самоцвет

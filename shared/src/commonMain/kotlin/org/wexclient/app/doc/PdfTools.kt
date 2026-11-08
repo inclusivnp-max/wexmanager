@@ -41,9 +41,9 @@ object PdfTools {
 
     fun info(path: Path): PdfInfo? {
         val result = runCatching {
-            ProcessRunner.run(listOf("pdfinfo", path.toAbsolutePath().toString()), timeoutMs = 15_000)
+            ProcessRunner.run(listOf("pdfinfo", path.toAbsolutePath().toString()), timeoutMs = 15_000, env = mapOf("LC_ALL" to "C"))
         }.getOrNull() ?: return null
-        if (result.output.isBlank()) return null
+        if (!result.ok || result.output.isBlank()) return null
 
         val fields = HashMap<String, String>()
         for (line in result.output.lines()) {

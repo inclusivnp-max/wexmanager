@@ -215,7 +215,8 @@ fun DualPaneScreen(
     androidx.compose.runtime.LaunchedEffect(leftPaneState) { leftPaneState.ensureListed() }
     androidx.compose.runtime.LaunchedEffect(rightPaneState) { rightPaneState.ensureListed() }
 
-    val leftActiveState: androidx.compose.runtime.MutableState<Boolean> = panes?.leftActive ?: remember { mutableStateOf(true) }
+    val paneTabs = panes ?: remember(leftTabs, rightTabs) { DualPaneTabs(leftTabs, rightTabs) }
+    val leftActiveState = paneTabs.leftActive
     var isLeftActive by leftActiveState
     var splitRatio by remember { mutableStateOf(0.5f) }
     // Язычок на границе панелей: положение берётся при размещении, без перекомпоновки экрана
@@ -1618,18 +1619,13 @@ fun DualPaneScreen(
 
     /** Открыть в панели папку файла и встать на него. */
     fun revealFile(pane: FilePaneState, path: java.nio.file.Path) {
-        val dir = path.parent ?: return
-        pane.searchQuery = ""
-        pane.navigateTo(dir)
-        if (pane.currentPath != vfsManager.live(dir)) return
-        val name = arrivedName(path)
-        pane.whenLoaded {
-            val idx = pane.entries.indexOfFirst { it.name == name }
-            if (idx >= 0) {
-                pane.focusedIndex = idx
-                pane.revealArrived(listOf(name))
-            }
-        }
+        pane.revealFile(path)
+        isLeftActive = pane === leftTabs.active
+        focusFileManager()
+    }
+
+    fun revealInManager(file: java.nio.file.Path) {
+        paneTabs.revealFile(file)
         focusFileManager()
     }
 
@@ -1707,11 +1703,13 @@ fun DualPaneScreen(
      */
     fun openFromOutside(target: java.nio.file.Path) {
         val entry = entryFor(target)
-        target.parent?.let { leftPaneState.navigateTo(it) }
+        val pane = leftTabs.active
+        isLeftActive = true
+        if (!entry.isDirectory) pane.revealFile(target)
         when {
             entry.itemType == VfsItemType.ARCHIVE_APKS -> bundleEntry = entry
             entry.itemType == VfsItemType.ARCHIVE_APK -> apkDetailEntry = entry
-            entry.isDirectory || entry.isArchive -> leftPaneState.enterEntry(entry)
+            entry.isDirectory || entry.isArchive -> pane.enterEntry(entry)
             else -> openEntryContent(entry)
         }
     }
@@ -1719,9 +1717,10 @@ fun DualPaneScreen(
     // Файл или папка из командной строки: так работают «Открыть с помощью», xdg-open и ярлык
     androidx.compose.runtime.LaunchedEffect(openOnStart) {
         val target = openOnStart ?: return@LaunchedEffect
-        if (Files.isDirectory(target)) {
-            leftPaneState.navigateTo(target)
-            revealOnStart?.let { leftPaneState.revealArrived(listOf(it)) }
+        if (revealOnStart != null) {
+            revealInManager(target.resolve(revealOnStart))
+        } else if (Files.isDirectory(target)) {
+            leftTabs.active.navigateTo(target)
         } else {
             openFromOutside(target)
         }
@@ -1737,8 +1736,7 @@ fun DualPaneScreen(
                 when {
                     // «Расположение»: показать файл в папке, не открывая его заново
                     pending.revealName != null -> {
-                        if (leftPaneState.currentPath != target) leftPaneState.navigateTo(target)
-                        leftPaneState.revealArrived(listOf(pending.revealName))
+                        revealInManager(target.resolve(pending.revealName))
                     }
                     Files.isDirectory(target) -> leftTabs.add(target)
                     else -> openFromOutside(target)

@@ -9,6 +9,7 @@ import java.util.Locale
  * 2 КБ памяти на строку. Пределы — с запасом на крупный шрифт (36 sp) и экран с масштабом 2.
  */
 object EditorLimits {
+    const val MAX_FILE_BYTES = 10 * 1024 * 1024
     const val MAX_LINES = 160_000
     const val MAX_LINE_CHARS = 100_000
 

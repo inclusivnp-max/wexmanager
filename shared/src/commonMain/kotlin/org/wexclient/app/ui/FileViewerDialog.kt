@@ -73,13 +73,14 @@ fun FileViewerDialog(
     /** Открыть на найденной строке (поиск по содержимому) */
     initialTarget: org.wexclient.app.editor.TextTarget? = null,
     /** «Расположение»: показать файл в панели менеджера (null — кнопки нет). */
-    onReveal: (() -> Unit)? = null
+    onReveal: (() -> Unit)? = null,
+    preparedController: org.wexclient.app.editor.CodeEditorController? = null
 ) {
     val language = remember(entry.name, content) {
         Languages.detect(entry.name, content.take(8192))
     }
     // Ключ — и путь: у двух файлов с одинаковым текстом свой контроллер (путь, кодировка, исходные байты)
-    val controller = remember(entry.path, content) { org.wexclient.app.editor.CodeEditorController(content) }
+    val controller = remember(entry.path, content, preparedController) { preparedController ?: org.wexclient.app.editor.CodeEditorController(content) }
     remember(controller) {
         val localPath = entry.path.takeIf { it.fileSystem == FileSystems.getDefault() }
         controller.attachFile(decoded ?: DecodedText(content, TextFileFormat(), false), originalBytes, localPath)
@@ -348,6 +349,7 @@ fun FileViewerDialog(
                         // весь текст в одном поле ввода, и Skia раскладывает его целиком на каждую
                         // правку — на мегабайте это доли секунды на букву. Правка — по кнопке.
                         CodeEditorView(
+                            active = focused,
                             initialText = content,
                             language = language,
                             readOnly = false,

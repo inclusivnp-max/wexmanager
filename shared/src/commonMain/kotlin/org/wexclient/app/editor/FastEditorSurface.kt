@@ -123,7 +123,8 @@ internal fun FastEditorSurface(
     onTypeCarets: (String) -> Unit,
     contextItems: () -> List<EditorMenuItem>,
     onZoom: (Float) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    active: Boolean = true
 ) {
     val prefs = EditorPreferences
     val colors = rememberEditorColors()
@@ -155,7 +156,9 @@ internal fun FastEditorSurface(
     val holder = remember(ctrl) { LayoutHolder() }
 
     // Каретка мигает, но замирает, пока печатают: следим за правками и курсором без рекомпозиции
-    androidx.compose.runtime.LaunchedEffect(ctrl) {
+    val blinking = active && ctrl.hasFocus
+    androidx.compose.runtime.LaunchedEffect(ctrl, blinking) {
+        if (!blinking) { state.caretVisible = false; return@LaunchedEffect }
         androidx.compose.runtime.snapshotFlow { ctrl.value.selection.end to ctrl.version }
             .collectLatest {
                 state.caretVisible = true
@@ -254,6 +257,23 @@ internal class FastSurfaceState(private val ctrl: CodeEditorController) {
     var scrollY by mutableStateOf(0f)
     var scrollX by mutableStateOf(0f)
     var viewport by mutableStateOf(IntSize.Zero)
+    private var affinityLayout: FastLayout? = null
+    private var affinityOffset = -1
+    private var affinityRow = -1
+
+    fun setCaretRow(layout: FastLayout, offset: Int, row: Int?) {
+        affinityLayout = layout
+        affinityOffset = offset
+        affinityRow = row ?: -1
+    }
+
+    fun caretPosition(layout: FastLayout, offset: Int): Pair<Int, Int> {
+        if (affinityLayout === layout && affinityOffset == offset && affinityRow >= 0) {
+            val previous = layout.rowAndColumn(offset, previousRow = true)
+            if (previous.first == affinityRow) return previous
+        }
+        return layout.rowAndColumn(offset)
+    }
     var metrics: Metrics = Metrics(7f, 14f)
 
     /** Геометрия последней отрисовки — нужна обработчикам мыши. */
@@ -300,6 +320,7 @@ internal class FastSurfaceState(private val ctrl: CodeEditorController) {
      * и тачпадом можно было уехать вправо в пустоту без конца.
      */
     fun maxScrollX(): Float {
+        if (layout?.wrap == true) return 0f
         val content = longestColumns * metrics.charWidth + textLeft + 40f - viewport.width
         return max(0f, max(content, scrollX))
     }
@@ -313,7 +334,7 @@ internal class FastSurfaceState(private val ctrl: CodeEditorController) {
     fun reveal(offset: Int, center: Boolean = false) {
         val lay = layout ?: return
         if (viewport.height <= 0) return
-        val (row, column) = lay.rowAndColumn(offset)
+        val (row, column) = caretPosition(lay, offset)
         val y = row * metrics.lineHeight
         if (center) {
             scrollY = (y - viewport.height / 2f).coerceIn(0f, maxScrollY())
@@ -384,18 +405,31 @@ private fun FastSurfaceCanvas(
     fun text() = ctrl.value.text
 
     fun wrapColumns(): Int {
-        if (!prefs.softWrap) return 0
+        if (!ctrl.softWrap) return 0
         val usable = state.viewport.width - state.textLeft - 14f
         return max(8, (usable / m().charWidth).toInt())
     }
 
-    fun layout(): FastLayout = holder.get(
-        snap(),
-        prefs.tabSize,
-        prefs.showWhitespace,
-        wrapColumns(),
-        ctrl.effectiveCollapsed()
-    ).also { state.layout = it }
+    fun layout(): FastLayout {
+        val snapshot = snap()
+        val digits = max(2, snapshot.lineCount.toString().length)
+        val numbers = if (prefs.showLineNumbers) digits * m().charWidth + GUTTER_PAD * 2 else GUTTER_PAD
+        state.foldLeft = numbers
+        state.gutterWidth = numbers + m().charWidth + GUTTER_PAD
+        state.textLeft = state.gutterWidth + 6f
+        val old = state.layout
+        val next = holder.get(snapshot, prefs.tabSize, prefs.showWhitespace, wrapColumns(), ctrl.effectiveCollapsed())
+        if (old !== next && old != null && old.snapshot === next.snapshot && old.columns != next.columns) {
+            val first = (state.scrollY / m().lineHeight).toInt()
+            val anchor = old.offsetAt(first, 0)
+            val remainder = state.scrollY % m().lineHeight
+            state.scrollY = next.rowAndColumn(anchor).first * m().lineHeight + remainder
+        }
+        if (next.wrap) state.scrollX = 0f
+        state.layout = next
+        state.scrollY = state.scrollY.coerceIn(0f, state.maxScrollY())
+        return next
+    }
 
     /** Экранная строка под точкой [y] окна. */
     fun rowAt(y: Float, lay: FastLayout): Int =
@@ -406,19 +440,23 @@ private fun FastSurfaceCanvas(
         val lay = layout()
         val x = (pos.x + state.scrollX - state.textLeft) / m().charWidth
         val column = if (nearest) x.roundToInt() else floor(x).toInt()
-        return lay.offsetAt(rowAt(pos.y, lay), max(0, column))
+        val row = rowAt(pos.y, lay)
+        val offset = lay.offsetAt(row, max(0, column))
+        state.setCaretRow(lay, offset, row)
+        return offset
     }
 
     fun setSelection(start: Int, end: Int) {
         currentOnChange(ctrl.value.copy(selection = TextRange(start, end)))
     }
 
-    fun moveCaret(to: Int, extend: Boolean, keepColumn: Boolean = false) {
+    fun moveCaret(to: Int, extend: Boolean, keepColumn: Boolean = false, visualRow: Int? = null) {
         // Движение вверх-вниз помнит колонку: пройдя короткую строку, каретка возвращается
         // на прежнее место, как в любом редакторе кода
         if (!keepColumn) state.desiredColumn = -1
         val anchor = if (extend) ctrl.value.selection.start else to
         setSelection(anchor, to)
+        state.setCaretRow(layout(), ctrl.value.selection.end, visualRow)
         if (keepColumn) {
             state.desiredCaret = ctrl.value.selection.end
             state.desiredVersion = ctrl.version
@@ -500,7 +538,7 @@ private fun FastSurfaceCanvas(
             state.scrollY = (state.scrollY + sign(dy) * max(mt.lineHeight / 2f, abs(dy) / 2f)).coerceIn(0f, state.maxScrollY())
             moved = state.scrollY != before
         }
-        if (!prefs.softWrap && w > 0f) {
+        if (!ctrl.softWrap && w > 0f) {
             val dx = when {
                 p.x < state.textLeft && state.scrollX > 0f -> p.x - state.textLeft
                 p.x > w -> p.x - w
@@ -540,7 +578,7 @@ private fun FastSurfaceCanvas(
         before - state.scrollY
     }
     val horizontal = rememberScrollableState { delta ->
-        if (prefs.softWrap) return@rememberScrollableState 0f
+        if (ctrl.softWrap) return@rememberScrollableState 0f
         val before = state.scrollX
         state.scrollX = (state.scrollX - delta).coerceIn(0f, state.maxScrollX())
         before - state.scrollX
@@ -825,21 +863,20 @@ private fun FastSurfaceCanvas(
                 val lineStart = snap.lineStart(line)
                 val lineEnd = snap.lineEnd(line)
                 val page = max(1, (state.viewport.height / metrics.lineHeight).toInt() - 2)
-                val (caretRow, caretColumn) = lay.rowAndColumn(caret)
+                val (caretRow, caretColumn) = state.caretPosition(lay, caret)
+                var movedRow = caretRow
                 fun rowMove(delta: Int): Int {
                     if (state.desiredColumn < 0 || state.desiredCaret != caret || state.desiredVersion != ctrl.version) {
                         state.desiredColumn = caretColumn
                     }
-                    return lay.offsetAt(
-                        (caretRow + delta).coerceIn(0, max(0, lay.totalRows - 1)),
-                        state.desiredColumn
-                    )
+                    movedRow = (caretRow + delta).coerceIn(0, max(0, lay.totalRows - 1))
+                    return lay.offsetAt(movedRow, state.desiredColumn)
                 }
                 fun pageMove(delta: Int, extend: Boolean) {
                     val target = rowMove(delta)
                     // Вид листается на ту же страницу: каретка остаётся на прежнем месте экрана
                     state.scrollY = (state.scrollY + delta * metrics.lineHeight).coerceIn(0f, state.maxScrollY())
-                    moveCaret(target, extend, keepColumn = true)
+                    moveCaret(target, extend, keepColumn = true, visualRow = movedRow)
                 }
                 fun scrollRows(delta: Int) {
                     state.scrollY = (state.scrollY + delta * metrics.lineHeight).coerceIn(0f, state.maxScrollY())
@@ -907,8 +944,8 @@ private fun FastSurfaceCanvas(
                     // Ctrl+↑/↓ — прокрутка на строку без движения каретки
                     plainCtrl && e.key == Key.DirectionDown -> { scrollRows(1); true }
                     plainCtrl && e.key == Key.DirectionUp -> { scrollRows(-1); true }
-                    e.key == Key.DirectionDown -> { moveCaret(rowMove(1), e.isShiftPressed, keepColumn = true); true }
-                    e.key == Key.DirectionUp -> { moveCaret(rowMove(-1), e.isShiftPressed, keepColumn = true); true }
+                    e.key == Key.DirectionDown -> { moveCaret(rowMove(1), e.isShiftPressed, keepColumn = true, visualRow = movedRow); true }
+                    e.key == Key.DirectionUp -> { moveCaret(rowMove(-1), e.isShiftPressed, keepColumn = true, visualRow = movedRow); true }
                     e.key == Key.DirectionLeft -> {
                         // Стрелка вбок при выделении — к его краю, как в любом поле ввода
                         val to = if (!selection.collapsed && !e.isShiftPressed) selFrom else stepLeft(t, caret)
@@ -922,12 +959,17 @@ private fun FastSurfaceCanvas(
                     e.key == Key.PageUp -> { pageMove(-page, e.isShiftPressed); true }
                     e.key == Key.MoveHome -> {
                         // Сначала к первому непробельному знаку строки, повторно — к самому началу
-                        var i = lineStart
-                        while (i < lineEnd && (t[i] == ' ' || t[i] == '\t')) i++
-                        moveCaret(if (caret == i) lineStart else i, e.isShiftPressed)
+                        val start = if (lay.wrap) lay.offsetAt(caretRow, 0) else lineStart
+                        val end = if (lay.wrap) lay.offsetAt(caretRow, Int.MAX_VALUE) else lineEnd
+                        var i = start
+                        while (i < end && (t[i] == ' ' || t[i] == '\t')) i++
+                        moveCaret(if (caret == i) start else i, e.isShiftPressed, visualRow = caretRow)
                         true
                     }
-                    e.key == Key.MoveEnd -> { moveCaret(lineEnd, e.isShiftPressed); true }
+                    e.key == Key.MoveEnd -> {
+                        moveCaret(if (lay.wrap) lay.offsetAt(caretRow, Int.MAX_VALUE) else lineEnd, e.isShiftPressed, visualRow = caretRow)
+                        true
+                    }
                     // ---- правка ----
                     readOnly -> false
                     e.key == Key.Backspace -> {
@@ -982,7 +1024,7 @@ private fun FastSurfaceCanvas(
         val selFrom = min(selection.start, selection.end).coerceIn(0, snap.text.length)
         val selTo = max(selection.start, selection.end).coerceIn(0, snap.text.length)
         val caret = selection.end.coerceIn(0, snap.text.length)
-        val (caretRow, caretColumn) = lay.rowAndColumn(caret)
+        val (caretRow, caretColumn) = state.caretPosition(lay, caret)
         val (selFromRow, selFromColumn) = lay.rowAndColumn(selFrom)
         val (selToRow, selToColumn) = lay.rowAndColumn(selTo)
 
@@ -991,11 +1033,10 @@ private fun FastSurfaceCanvas(
         /** Сколько колонок текста в экранной строке (при переносе — её кусок строки). */
         fun rowTextWidth(row: Int): Int {
             val line = lay.lineOfRow(row)
-            val width = lay.shownLine(line).width
-            return if (lay.wrap) (width - (row - lay.firstRowOf(line)) * lay.columns).coerceIn(0, lay.columns) else width
+            return lay.rowWidth(row)
         }
         /** Докуда тянуть выделение, переходящее на следующую экранную строку. */
-        fun rowWidth(row: Int): Int = if (lay.wrap) lay.columns else rowTextWidth(row) + 1
+        fun rowWidth(row: Int): Int = rowTextWidth(row) + if (lay.wrap) 0 else 1
 
         /**
          * Прямоугольники под кусок текста [from, to): по одному на экранную строку, с учётом табов
@@ -1146,11 +1187,13 @@ private fun FastSurfaceCanvas(
                 val b = if (row == selToRow) selToColumn else rowWidth(row)
                 val x1 = columnX(a)
                 val x2 = columnX(max(a, b))
-                drawRect(
-                    colors.selection,
-                    topLeft = Offset(x1, y),
-                    size = Size(max(cw * 0.4f, x2 - x1), lh)
-                )
+                if (!lay.wrap || x2 > x1) {
+                    drawRect(
+                        colors.selection,
+                        topLeft = Offset(x1, y),
+                        size = Size(max(cw * 0.4f, x2 - x1), lh)
+                    )
+                }
             }
 
             if (prefs.showIndentGuides && indentWidth > 0 && (!lay.wrap || firstOfLine)) {
@@ -1167,11 +1210,11 @@ private fun FastSurfaceCanvas(
             }
 
             val layout = cache.row(lay, line, row, slice, styles, colors.text)
-            drawLaidOut(layout, Offset(columnX(slice.first), y))
+            drawLaidOut(layout, Offset(columnX(if (lay.wrap) 0 else slice.first), y))
 
             if (collapsedStarts.contains(line) && firstOfLine) {
                 val mark = cache.mark(" ⋯ ", colors.dim)
-                val markX = columnX(shown.width + 1)
+                val markX = columnX((if (lay.wrap) rowTextWidth(row) else shown.width) + 1)
                 drawRect(colors.foldBox, topLeft = Offset(markX, y + 1f), size = Size(mark.size.width.toFloat(), lh - 2f))
                 drawLaidOut(mark, Offset(markX, y))
             }
@@ -1358,9 +1401,10 @@ private fun FastSurfaceCompletion(
     focusRequester: FocusRequester
 ) {
     val completion = ctrl.completion ?: return
+    val window = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize
     val lay = state.layout ?: return
     val density = LocalDensity.current
-    val (row, column) = lay.rowAndColumn(ctrl.value.selection.end)
+    val (row, column) = state.caretPosition(lay, ctrl.value.selection.end)
     val x = state.textLeft + column * metrics.charWidth - state.scrollX
     val y = row * metrics.lineHeight - state.scrollY
     val caretRect = androidx.compose.ui.geometry.Rect(x, y, x + 2f, y + metrics.lineHeight)
@@ -1370,7 +1414,10 @@ private fun FastSurfaceCompletion(
         onDismissRequest = { ctrl.closeCompletion() },
         properties = androidx.compose.ui.window.PopupProperties(focusable = false)
     ) {
-        CompletionPopup(completion, colors, fontSize) { item, word ->
+        val available = with(density) {
+            androidx.compose.ui.unit.DpSize(window.width.toDp(), window.height.toDp())
+        }
+        CompletionPopup(completion, colors, fontSize, available, onSelect = ctrl::selectCompletion) { item, word ->
             ctrl.acceptCompletion(item, word)
             runCatching { focusRequester.requestFocus() }
         }
@@ -1467,6 +1514,9 @@ internal class Metrics(val charWidth: Float, val lineHeight: Float)
 /** Раскладка документа, пересобираемая только при изменении текста или ширины. */
 internal class LayoutHolder {
     private var value: FastLayout? = null
+    private var widthSnapshot: HighlightSnapshot? = null
+    private var widthTabSize = -1
+    private var widths: IntArray? = null
 
     fun get(
         snap: HighlightSnapshot,
@@ -1481,7 +1531,13 @@ internal class LayoutHolder {
         ) {
             return cur
         }
-        return FastLayout(snap, tabSize, whitespace, columns, collapsed).also { value = it }
+        if (columns > 0 && (widthSnapshot !== snap || widthTabSize != tabSize)) {
+            val measuring = FastLayout(snap, tabSize, whitespace, 0)
+            widths = IntArray(snap.lineCount) { measuring.visualWidth(snap, it, tabSize) }
+            widthSnapshot = snap
+            widthTabSize = tabSize
+        }
+        return FastLayout(snap, tabSize, whitespace, columns, collapsed, if (columns > 0) widths else null).also { value = it }
     }
 }
 

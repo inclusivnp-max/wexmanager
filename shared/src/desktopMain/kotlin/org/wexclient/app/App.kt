@@ -148,18 +148,23 @@ fun launchWex(args: Array<String> = emptyArray()) {
             exitApplication()
         }
 
+        suspend fun openRequested(path: java.nio.file.Path?) {
+            val editor = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                path != null && WexWindows.opensInEditor(path)
+            }
+            if (editor) WexWindows.openEditor(path!!) else WexWindows.openManager(path)
+            androidx.compose.runtime.withFrameNanos { }
+        }
+
         androidx.compose.runtime.LaunchedEffect(Unit) {
-            if (!background) WexWindows.open(openOnStart)
+            if (!background) openRequested(openOnStart)
             org.wexclient.app.util.SingleInstance.listen()
         }
         // Просьбы от других запусков WEX
         androidx.compose.runtime.LaunchedEffect(Unit) {
-            androidx.compose.runtime.snapshotFlow { org.wexclient.app.util.SingleInstance.requested }
-                .collect { request ->
-                    if (request == null) return@collect
-                    org.wexclient.app.util.SingleInstance.done(request)
-                    WexWindows.open(request.path)
-                }
+            org.wexclient.app.util.SingleInstance.requests.collect { request ->
+                openRequested(request.path)
+            }
         }
         // После закрытия последнего окна освобождаем ресурсы, сохраняя процесс для следующего открытия.
         val hadWindows = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
@@ -238,7 +243,7 @@ private fun ApplicationScope.ManagerWindow(
     var closeRequests by remember { mutableStateOf(0) }
     Window(
         onCloseRequest = { closeRequests++ },
-        title = "WEX Desktop — MT Manager",
+        title = "WEX Desktop",
         // Значок ставится ниже, из подготовленного заранее набора: распаковка картинки в потоке
         // окна задерживала первый кадр на добрую десятую секунды
         state = rememberWindowState(width = 1200.dp, height = 800.dp)

@@ -6,8 +6,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
+import org.wexclient.app.editor.CodeEditorController
+import org.wexclient.app.editor.EditorWork
+import org.wexclient.app.editor.lang.Languages
+import kotlinx.coroutines.runInterruptible
 import java.nio.file.Path
 import org.wexclient.app.editor.DecodedText
 import org.wexclient.app.editor.TextCodec
@@ -27,12 +32,13 @@ fun EditorWindowUi(
     onFallback: (Path) -> Unit,
     onClose: () -> Unit
 ) {
-    class Loaded(val entry: VfsEntry, val decoded: DecodedText, val bytes: ByteArray)
+    class Loaded(val entry: VfsEntry, val decoded: DecodedText, val bytes: ByteArray, val controller: CodeEditorController)
 
     var loaded by remember(window.file) { mutableStateOf<Loaded?>(null) }
 
     LaunchedEffect(window.file) {
-        val result = withContext(Dispatchers.IO) {
+        val jobContext = coroutineContext
+        val result = runInterruptible(EditorWork.loading) {
             runCatching {
                 val bytes = vfsManager.readBytesLimited(window.file, MAX_BYTES)
                 val decoded = TextCodec.decode(bytes)
@@ -40,10 +46,17 @@ fun EditorWindowUi(
                 if (org.wexclient.app.editor.EditorLimits.fastProblem(decoded.text) != null) {
                     error("слишком большой текст")
                 }
-                Loaded(VfsEntry.of(window.file), decoded, bytes)
+                jobContext.ensureActive()
+                val controller = CodeEditorController(decoded.text)
+                controller.attachFile(decoded, bytes, window.file)
+                controller.applyLanguage(Languages.detect(window.file.fileName.toString(), decoded.text.take(8192)))
+                jobContext.ensureActive()
+                Loaded(VfsEntry.of(window.file), decoded, bytes, controller)
             }
         }
+        coroutineContext.ensureActive()
         result.onSuccess { loaded = it }.onFailure {
+            if (it is CancellationException) throw it
             onFallback(window.file)
             onClose()
         }
@@ -55,6 +68,7 @@ fun EditorWindowUi(
         content = data.decoded.text,
         decoded = data.decoded,
         originalBytes = data.bytes,
+        preparedController = data.controller,
         // Вызывается в фоне: ошибку редактор покажет сам и не снимет пометку «изменено»
         onSave = { bytes -> vfsManager.writeBytes(window.file, bytes) },
         onOpenFile = { target -> WexWindows.open(target) },
@@ -64,4 +78,4 @@ fun EditorWindowUi(
 }
 
 /** Столько же, сколько открывает панель: дальше это уже не текст для правки. */
-private const val MAX_BYTES = 2 * 1024 * 1024
+private const val MAX_BYTES = org.wexclient.app.editor.EditorLimits.MAX_FILE_BYTES

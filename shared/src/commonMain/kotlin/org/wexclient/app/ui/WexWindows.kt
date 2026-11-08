@@ -1,5 +1,7 @@
 package org.wexclient.app.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateListOf
 import java.nio.file.Files
 import java.nio.file.Path
@@ -32,7 +34,7 @@ object WexWindows {
     val editors = mutableStateListOf<EditorWindow>()
 
     /** Окно, которое просят показать поверх остальных (его id); сбрасывается самим окном. */
-    var raise: Int? = null
+    var raise: Int? by androidx.compose.runtime.mutableStateOf(null)
         private set
 
     private var nextId = 1
@@ -70,12 +72,13 @@ object WexWindows {
 
     @Synchronized
     fun openEditor(file: Path) {
-        val same = editors.firstOrNull { it.file == file }
+        val normalized = file.toAbsolutePath().normalize()
+        val same = editors.firstOrNull { it.file == normalized }
         if (same != null) {
             raise = same.id
             return
         }
-        editors.add(EditorWindow(nextId++, file))
+        editors.add(EditorWindow(nextId++, normalized))
     }
 
     @Synchronized
@@ -139,7 +142,7 @@ object WexWindows {
      * открывалось за разумное время. Теперь большой файл показывает быстрый редактор, который
      * рисует только видимые строки, поэтому предел тот же, что и у панели.
      */
-    private const val MAX_EDITOR_BYTES = 10L * 1024 * 1024
+    private const val MAX_EDITOR_BYTES = org.wexclient.app.editor.EditorLimits.MAX_FILE_BYTES
 
     private val NOT_TEXT = setOf(
         VfsItemType.FOLDER, VfsItemType.PARENT_DIR,

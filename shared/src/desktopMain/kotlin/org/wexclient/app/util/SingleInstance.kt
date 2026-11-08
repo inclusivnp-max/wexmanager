@@ -1,8 +1,5 @@
 package org.wexclient.app.util
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import java.io.File
 import java.io.IOException
 import java.net.StandardProtocolFamily
@@ -26,8 +23,8 @@ object SingleInstance {
     class Request(val id: Long, val path: Path?)
 
     /** Что попросил другой запуск WEX; читает [org.wexclient.app.launchWex]. */
-    var requested by mutableStateOf<Request?>(null)
-        private set
+    private val inbox = OpenRequestQueue<Request>()
+    val requests = inbox.requests
 
     private var counter = 0L
 
@@ -82,6 +79,7 @@ object SingleInstance {
      */
     fun stop() {
         listening = false
+        inbox.close()
         runCatching { server?.close() }
         server = null
         runCatching { Files.deleteIfExists(socketFile) }
@@ -117,7 +115,7 @@ object SingleInstance {
                             ?.let { runCatching { Paths.get(it) }.getOrNull() }
                             ?.takeIf { Files.exists(it) }
                         counter++
-                        requested = Request(counter, path)
+                        if (!inbox.submit(Request(counter, path))) return@Thread
                         onRequest(path)
                     }
                 } catch (_: IOException) {
@@ -142,8 +140,4 @@ object SingleInstance {
         }
     }
 
-    /** Просьбу выполнили — ждём следующую. */
-    fun done(request: Request) {
-        if (requested === request) requested = null
-    }
 }

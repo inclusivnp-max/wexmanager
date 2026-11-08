@@ -34,6 +34,7 @@ enum class VfsItemType {
     CODE_HTML,
     /** Pine Script (TradingView) */
     CODE_PINE,
+    CODE_WEX,
     CODE_SQL,
     CODE_RUBY,
     CODE_PHP,
@@ -247,6 +248,7 @@ data class VfsEntry(
                 lower.endsWith(".vue") || lower.endsWith(".svelte") || lower.endsWith(".astro") ||
                 lower.endsWith(".hbs") || lower.endsWith(".ejs") || lower.endsWith(".erb") ||
                 lower.endsWith(".twig") || lower.endsWith(".j2") -> VfsItemType.CODE_HTML
+                lower.endsWith(".wex") -> VfsItemType.CODE_WEX
                 lower.endsWith(".pine") || lower.endsWith(".pinescript") -> VfsItemType.CODE_PINE
                 lower.endsWith(".sh") || lower.endsWith(".bash") || lower.endsWith(".zsh") ||
                 lower.endsWith(".fish") || lower.endsWith(".command") -> VfsItemType.SHELL_SCRIPT

@@ -256,3 +256,6 @@ actual fun androidx.compose.ui.input.pointer.PointerEvent.clickCount(): Int =
 
 actual val ResizeHorizontalPointerIcon: androidx.compose.ui.input.pointer.PointerIcon =
     androidx.compose.ui.input.pointer.PointerIcon(java.awt.Cursor(java.awt.Cursor.E_RESIZE_CURSOR))
+
+actual val ResizeDiagonalPointerIcon: androidx.compose.ui.input.pointer.PointerIcon =
+    androidx.compose.ui.input.pointer.PointerIcon(java.awt.Cursor(java.awt.Cursor.SE_RESIZE_CURSOR))

@@ -99,7 +99,8 @@ fun CodeEditorView(
     saveButtonText: String = "Сохранить (Ctrl+S)",
     errorPrefix: String = "Не сохранено",
     /** Писать в фоне (файлы на диске и в архивах); без него [onSave] вызывается в потоке окна. */
-    backgroundSave: org.wexclient.app.ui.BackgroundSave? = null
+    backgroundSave: org.wexclient.app.ui.BackgroundSave? = null,
+    active: Boolean = true
 ) {
     val ctrl = controller ?: rememberCodeEditorController(initialText)
     ctrl.saver = onSave
@@ -646,7 +647,7 @@ fun CodeEditorView(
             "editor.moveUp" -> { perform(EditorAction.MoveUp); return true }
             "editor.moveDown" -> { perform(EditorAction.MoveDown); return true }
             "editor.complete" -> { ctrl.requestCompletion(explicit = true); return true }
-            "editor.wrap" -> { prefs.updateSoftWrap(!prefs.softWrap); return true }
+            "editor.wrap" -> { ctrl.updateSoftWrap(!ctrl.softWrap); return true }
             "editor.format" -> { doFormat(); return true }
             "editor.structure" -> { showStructure = true; return true }
             "editor.findInSelection" -> {
@@ -821,36 +822,44 @@ fun CodeEditorView(
     // ---------- Фоновые пересчёты ----------
 
     val version = ctrl.version
-    LaunchedEffect(ctrl, version, effectiveLanguage) {
+    LaunchedEffect(ctrl, version, effectiveLanguage, active) {
+        if (!active) return@LaunchedEffect
         val snap = ctrl.snapshot
+        if (ctrl.wordIndex?.version == snap.version) return@LaunchedEffect
         delay(if (snap.text.length > 300_000) 350 else 90)
-        val folds = runInterruptible(Dispatchers.Default) { runCatching { FoldingEngine.compute(snap) }.getOrDefault(emptyList()) }
+        val folds = runInterruptible(EditorWork.analysis) { runCatching { FoldingEngine.compute(snap) }.getOrDefault(emptyList()) }
         if (ctrl.snapshot.version != snap.version) return@LaunchedEffect
         ctrl.replaceFolds(folds)
-        val outline = runInterruptible(Dispatchers.Default) { runCatching { OutlineEngine.compute(snap, folds) }.getOrDefault(emptyList()) }
+        val outline = runInterruptible(EditorWork.analysis) { runCatching { OutlineEngine.compute(snap, folds) }.getOrDefault(emptyList()) }
         if (ctrl.snapshot.version != snap.version) return@LaunchedEffect
         ctrl.outline = outline
         delay(120)
-        val index = runInterruptible(Dispatchers.Default) { runCatching { WordIndexer.build(snap.text, snap.language, snap.version) }.getOrNull() }
-        if (index != null) ctrl.wordIndex = index
+        val index = runInterruptible(EditorWork.analysis) { runCatching { WordIndexer.build(snap.text, snap.language, snap.version) }.getOrNull() }
+        if (index != null && ctrl.snapshot.version == snap.version) ctrl.wordIndex = index
     }
 
-    LaunchedEffect(ctrl, version, effectiveLanguage, prefs.diagnostics, prefs.externalChecks) {
+    LaunchedEffect(ctrl, version, effectiveLanguage, prefs.diagnostics, prefs.externalChecks, active) {
         if (!prefs.diagnostics) {
             ctrl.diagnostics = emptyList()
+            ctrl.diagnosticsVersion = Long.MIN_VALUE
+            ctrl.diagnosticsExternalChecks = null
             return@LaunchedEffect
         }
+        if (!active) return@LaunchedEffect
         val snap = ctrl.snapshot
+        if (ctrl.diagnosticsVersion == snap.version && ctrl.diagnosticsExternalChecks == prefs.externalChecks) return@LaunchedEffect
         delay(if (snap.text.length > 300_000) 900 else 350)
-        val quick = runInterruptible(Dispatchers.Default) { runCatching { DiagnosticsEngine.quick(snap, fileName) }.getOrDefault(emptyList()) }
+        val quick = runInterruptible(EditorWork.analysis) { runCatching { DiagnosticsEngine.quick(snap, fileName) }.getOrDefault(emptyList()) }
         if (ctrl.snapshot.version != snap.version) return@LaunchedEffect
         ctrl.diagnostics = quick
         delay(600)
-        val slow = runInterruptible(Dispatchers.IO) {
+        val slow = runInterruptible(EditorWork.externalChecks) {
             runCatching { DiagnosticsEngine.slow(snap, fileName, prefs.externalChecks) }.getOrDefault(emptyList())
         }
         if (ctrl.snapshot.version != snap.version) return@LaunchedEffect
         ctrl.diagnostics = quick + slow
+        ctrl.diagnosticsVersion = snap.version
+        ctrl.diagnosticsExternalChecks = prefs.externalChecks
     }
 
     val findOptions = find.options
@@ -1090,6 +1099,7 @@ fun CodeEditorView(
                         )
                     }
                 } else FastEditorSurface(
+                    active = active,
                     ctrl = ctrl,
                     state = surface,
                     readOnly = effectiveReadOnly,

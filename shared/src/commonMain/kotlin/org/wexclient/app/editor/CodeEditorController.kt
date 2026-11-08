@@ -71,6 +71,16 @@ class CodeEditorController(initialText: String) {
         internal set
     var indentUnit by mutableStateOf("    ")
     internal var indentDetected = false
+    var softWrap by mutableStateOf(EditorPreferences.softWrap)
+        private set
+
+    fun updateSoftWrap(enabled: Boolean) {
+        softWrap = enabled
+        EditorPreferences.updateSoftWrap(enabled)
+    }
+
+    internal var diagnosticsVersion = Long.MIN_VALUE
+    internal var diagnosticsExternalChecks: Boolean? = null
 
     // ---------- Модели ----------
 
@@ -1120,6 +1130,13 @@ class CodeEditorController(initialText: String) {
 
     internal fun showCompletion(ui: CompletionUi?) {
         completion = ui
+    }
+
+    fun selectCompletion(index: Int) {
+        val current = completion ?: return
+        if (index in current.result.items.indices && index != current.selected) {
+            completion = CompletionUi(current.result, index, current.explicit)
+        }
     }
 
     fun moveCompletion(delta: Int) {

@@ -6,6 +6,7 @@ import org.wexclient.app.editor.lang.LanguageData
 import org.wexclient.app.editor.lang.Snippet
 import org.wexclient.app.editor.lang.Tok
 import org.wexclient.app.editor.lang.VocabWord
+import org.wexclient.app.editor.lang.WexSupport
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -325,11 +326,64 @@ object CompletionEngine {
         val lang = req.language
         pathCompletion(req)?.let { return it }
         return when {
+            lang.id == "wex" -> wex(req)
             lang.id == "smali" -> smali(req)
             lang.markup -> markup(req)
             lang.id == "css" || lang.id == "scss" -> css(req) ?: generic(req)
             lang.id == "shell" || lang.id == "fish" -> shell(req) ?: generic(req)
             else -> generic(req)
+        }
+    }
+
+    private val wexImport = Regex("^\\s*import\\s+")
+
+    private fun wex(req: CompletionRequest): CompletionResult? {
+        val text = req.text
+        val caret = req.caret
+        val token = req.snapshot?.tokenAt(caret - 1)
+        if (token in setOf(Tok.COMMENT, Tok.DOC_COMMENT, Tok.STRING, Tok.ESCAPE)) return null
+        val start = prefixStart(text, caret, req.language::isWordChar)
+        val prefix = text.substring(start, caret)
+        val lineStart = text.lastIndexOf('\n', maxOf(0, start - 1)) + 1
+        val importing = wexImport.matches(text.substring(lineStart, start))
+        val afterDot = start > 0 && text[start - 1] == '.'
+        if (!importing && !afterDot && !req.explicit && (prefix.isEmpty() || prefix.first().isDigit())) return null
+        val items = when {
+            importing -> vocabItems(req.language, setOf(ItemKind.MODULE))
+            afterDot -> qualifiedMembers(req.language, text, start - 1)
+            else -> return generic(req)?.let { result ->
+                CompletionResult(wexCalls(result.items, text, caret), result.replaceStart, caret, result.wordEnd, prefix)
+            }
+        }
+        val ranked = rank(prefix, items)
+        if (ranked.isEmpty()) return null
+        val qualifier = if (afterDot) {
+            var q = start - 1
+            while (q > 0 && req.language.isWordChar(text[q - 1])) q--
+            text.substring(q, start)
+        } else ""
+        return CompletionResult(if (importing) ranked else wexCalls(ranked, text, caret, qualifier),
+            start, caret, wordEnd(text, caret, req.language::isWordChar), prefix)
+    }
+
+    private fun wexCalls(items: List<CompletionItem>, text: String, caret: Int, qualifier: String = ""): List<CompletionItem> {
+        val end = wordEnd(text, caret) { it.isLetterOrDigit() || it == '_' }
+        var next = end
+        while (next < text.length && text[next].isWhitespace()) next++
+        val hasParenthesis = next < text.length && text[next] == '('
+        return items.map { item ->
+            val builtin = WexSupport.builtins.firstOrNull { it.name == qualifier + item.label }
+            val converted = when {
+                builtin != null && !hasParenthesis -> {
+                    val args = builtin.parameters.mapIndexed { index, name ->
+                        "\${" + (index + 1) + ":" + name.removeSuffix("...") + "}"
+                    }.joinToString(", ")
+                    CompletionItem(item.label, item.kind, item.detail, item.label + "(" + args + ")\$0", true, item.boost)
+                }
+                item.kind == ItemKind.MODULE && (next >= text.length || text[next] != '.') -> CompletionItem(item.label, item.kind, item.detail, item.label + ".", retrigger = true)
+                else -> item
+            }
+            converted.also { it.score = item.score; it.matched = item.matched }
         }
     }
 

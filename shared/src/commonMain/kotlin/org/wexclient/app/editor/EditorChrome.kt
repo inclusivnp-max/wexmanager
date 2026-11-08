@@ -1158,11 +1158,11 @@ private val READ_ONLY_ACTIONS = setOf(
 )
 
 @Composable
-internal fun ViewMenu(expanded: Boolean, onDismiss: () -> Unit) {
+internal fun ViewMenu(ctrl: CodeEditorController, expanded: Boolean, onDismiss: () -> Unit) {
     val p = EditorPreferences
     WexDropdownMenu(expanded = expanded, onDismissRequest = onDismiss, modifier = Modifier.heightIn(max = 640.dp)) {
         MenuSection("Вид")
-        MenuToggle("Перенос строк (" + Keymap.label("editor.wrap") + ")", p.softWrap, Icons.AutoMirrored.Filled.WrapText) { p.updateSoftWrap(it) }
+        MenuToggle("Перенос строк (" + Keymap.label("editor.wrap") + ")", ctrl.softWrap, Icons.AutoMirrored.Filled.WrapText) { ctrl.updateSoftWrap(it) }
         MenuToggle("Миникарта", p.showMinimap, Icons.Default.Map) { p.updateShowMinimap(it) }
         MenuToggle("Панель структуры (Alt+7)", p.showOutline, Icons.Default.AccountTree) { p.updateShowOutline(it) }
         MenuToggle("Номера строк", p.showLineNumbers, Icons.Default.FormatListNumbered) { p.updateShowLineNumbers(it) }
@@ -1274,8 +1274,8 @@ internal fun EditorToolbar(
             ToolIcon(Icons.AutoMirrored.Filled.Toc, "Структура (Alt+7)", active = EditorPreferences.showOutline) {
                 EditorPreferences.updateShowOutline(!EditorPreferences.showOutline)
             }
-            ToolIcon(Icons.AutoMirrored.Filled.WrapText, "Перенос строк (" + Keymap.label("editor.wrap") + ")", active = EditorPreferences.softWrap) {
-                EditorPreferences.updateSoftWrap(!EditorPreferences.softWrap)
+            ToolIcon(Icons.AutoMirrored.Filled.WrapText, "Перенос строк (" + Keymap.label("editor.wrap") + ")", active = ctrl.softWrap) {
+                ctrl.updateSoftWrap(!ctrl.softWrap)
             }
             ToolIcon(Icons.Default.Map, "Миникарта", active = EditorPreferences.showMinimap) {
                 EditorPreferences.updateShowMinimap(!EditorPreferences.showMinimap)
@@ -1286,7 +1286,7 @@ internal fun EditorToolbar(
             }
             Box {
                 ToolIcon(Icons.Default.Settings, "Вид и настройки редактора") { viewOpen = true }
-                ViewMenu(viewOpen) { viewOpen = false }
+                ViewMenu(ctrl, viewOpen) { viewOpen = false }
             }
             // Масштаб
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {

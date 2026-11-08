@@ -213,4 +213,20 @@ class DualPaneTabs(val left: PaneTabs, val right: PaneTabs) {
     val leftActive = androidx.compose.runtime.mutableStateOf(true)
 
     val activePane: FilePaneState get() = if (leftActive.value) left.active else right.active
+
+    /** Уже открытая папка важнее стороны панели; иначе используем текущую вкладку. */
+    fun revealFile(file: Path): FilePaneState? {
+        val target = file.toAbsolutePath().normalize()
+        val parent = target.parent ?: return null
+        val preferred = if (leftActive.value) left else right
+        val other = if (leftActive.value) right else left
+        val owner = listOf(preferred, other).firstOrNull { tabs ->
+            tabs.tabs.any { it.currentPath.toAbsolutePath().normalize() == parent }
+        } ?: preferred
+        val existing = owner.index.takeIf { owner.active.currentPath.toAbsolutePath().normalize() == parent }
+            ?: owner.tabs.indexOfFirst { it.currentPath.toAbsolutePath().normalize() == parent }
+        if (existing >= 0) owner.select(existing)
+        leftActive.value = owner === left
+        return owner.active.also { it.revealFile(target) }
+    }
 }

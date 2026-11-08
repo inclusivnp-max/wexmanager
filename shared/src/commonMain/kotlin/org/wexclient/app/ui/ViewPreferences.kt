@@ -44,7 +44,7 @@ enum class TypeFilter(val title: String, val symbol: String) {
             VfsItemType.XML, VfsItemType.SMALI, VfsItemType.CODE_KOTLIN, VfsItemType.CODE_JAVA,
             VfsItemType.CODE_PYTHON, VfsItemType.CODE_LUA, VfsItemType.CODE_JAVASCRIPT,
             VfsItemType.CODE_TYPESCRIPT, VfsItemType.CODE_C_CPP, VfsItemType.CODE_RUST, VfsItemType.CODE_GO,
-            VfsItemType.CODE_CSS, VfsItemType.CODE_HTML, VfsItemType.CODE_PINE, VfsItemType.BATCH_SCRIPT,
+            VfsItemType.CODE_CSS, VfsItemType.CODE_HTML, VfsItemType.CODE_PINE, VfsItemType.CODE_WEX, VfsItemType.BATCH_SCRIPT,
             VfsItemType.SHELL_SCRIPT, VfsItemType.JSON, VfsItemType.YAML, VfsItemType.MARKDOWN,
             VfsItemType.PROPERTIES_CONF, VfsItemType.TEXT_FILE,
             VfsItemType.CODE_SQL, VfsItemType.CODE_RUBY, VfsItemType.CODE_PHP, VfsItemType.CODE_SWIFT,

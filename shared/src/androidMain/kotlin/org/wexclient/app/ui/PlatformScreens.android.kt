@@ -18,3 +18,5 @@ actual fun rememberFileDropTarget(onHover: (Boolean) -> Unit, onDrop: (paths: Li
 actual fun PointerEvent.clickCount(): Int = 1
 
 actual val ResizeHorizontalPointerIcon: PointerIcon get() = PointerIcon.Default
+
+actual val ResizeDiagonalPointerIcon: PointerIcon get() = PointerIcon.Default

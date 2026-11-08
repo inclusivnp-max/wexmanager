@@ -1,0 +1,45 @@
+// WexLanguage - Advanced Features & Security Test (.wex)
+import memory;
+import gui;
+
+log("=== Starting WexLanguage Advanced Test ===");
+
+// 1. Anti-Debug Environment Security Verification
+var is_environment_clean = security_check();
+if (is_environment_clean) {
+    log("[SEC] Anti-Debug Check PASSED: No tracers, Frida or debuggers detected.");
+} else {
+    log("[SEC] Threat or Debugger detected in environment!");
+}
+
+// 2. Module & Hex Formatting
+var unity_base = memory.find_module("libunity.so");
+log("Base address: " + hex(unity_base));
+
+// 3. Multi-level Pointer Chain Resolution
+log("Resolving pointer chain: base -> [0x20, 0x48, 0x10]...");
+var resolved_player_ptr = memory.read_chain(unity_base, 0x20, 0x48, 0x10);
+log("Resolved Player Pointer: " + hex(resolved_player_ptr));
+
+// 4. Pattern Scanning (AOB with wildcards)
+log("Scanning for signature pattern: '1F 20 ?? D5'...");
+var pattern_addr = memory.scan_pattern("libunity.so", "1F 20 ?? D5");
+log("Pattern scan address result: " + hex(pattern_addr));
+
+// 5. Loops and Logic
+var count = 3;
+while (count > 0) {
+    log("Tick down: " + count);
+    count = count - 1;
+}
+
+// 6. GUI Overlay Integration
+gui.begin("Wex Stealth Monitor - Advanced", 400.0, 250.0);
+gui.text("Security: Hardened WexVM");
+gui.text("Pointer Chain: " + hex(resolved_player_ptr));
+gui.separator();
+var raycast_active = gui.checkbox("Precision Raycast Engine", true);
+var fov = gui.slider("Raycast Angle FOV", 90.0, 30.0, 180.0);
+gui.end();
+
+log("=== All Tests Completed Successfully ===");
