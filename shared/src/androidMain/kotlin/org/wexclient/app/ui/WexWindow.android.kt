@@ -72,6 +72,7 @@ actual fun WexWindow(
     size: DpSize,
     onPreviewKeyEvent: (KeyEvent) -> Boolean,
     onKeyEvent: (KeyEvent) -> Boolean,
+    independent: Boolean,
     content: @Composable () -> Unit
 ) {
     val host = LocalWindowLayers.current ?: error("WexWindow без WindowLayersHost")

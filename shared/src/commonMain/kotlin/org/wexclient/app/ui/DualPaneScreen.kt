@@ -3082,11 +3082,8 @@ fun DualPaneScreen(
                 if (linked.isDirectory) activeState.navigateTo(target) else openEntryContent(linked)
             },
             onReveal = {
-                val dir = entry.path.parent
-                if (dir != null) {
-                    activeState.navigateTo(dir)
-                    activeState.revealArrived(listOf(entry.name))
-                }
+                revealInManager(entry.path)
+                WexWindows.raiseManager(windowId)
             },
             onSave = { bytes ->
                 // Вызывается в фоне. Исключение пробрасываем: редактор покажет ошибку и не снимет «изменено»

@@ -16,5 +16,7 @@ expect fun WexWindow(
     size: DpSize,
     onPreviewKeyEvent: (KeyEvent) -> Boolean = { false },
     onKeyEvent: (KeyEvent) -> Boolean = { false },
+    /** Обычное окно документа: не блокирует менеджер и другие открытые файлы. */
+    independent: Boolean = false,
     content: @Composable () -> Unit
 )

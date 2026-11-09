@@ -1,6 +1,5 @@
 package org.wexclient.app.dex
 
-import org.benf.cfr.reader.api.CfrDriver
 import org.benf.cfr.reader.api.OutputSinkFactory
 import org.benf.cfr.reader.api.SinkReturns
 import java.util.concurrent.ConcurrentHashMap
@@ -26,15 +25,15 @@ class CfrEngine(
 
     private val javaByClass = ConcurrentHashMap<String, String>()
 
-    fun decompileToJava(fullName: String): String {
+    fun decompileToJava(fullName: String, familyNames: Set<String> = emptySet()): String {
         javaByClass[fullName]?.let { return it }
         return try {
             // Трансляция DEX -> jar одна на всех (дальше из кэша), CFR — только на этом классе
             val entryName = fullName.replace('.', '/') + ".class"
-            val first = decompileFrom(cache.jarsFor(entryName), entryName, fullName)
+            val first = decompileFrom(cache.jarsFor(entryName), fullName, familyNames)
                 ?: return "// CFR: класс $fullName не найден в транслированном jar"
             val java = DexToJar.secondOpinion(first, FAILED) {
-                cache.alternativeJarsFor(entryName)?.let { decompileFrom(it, entryName, fullName) }
+                cache.alternativeJarsFor(entryName)?.let { decompileFrom(it, fullName, familyNames) }
             }
             javaByClass[fullName] = java
             java
@@ -44,20 +43,9 @@ class CfrEngine(
     }
 
     /** Java класса из первого jar, где он есть; null — ни в одном. */
-    private fun decompileFrom(jars: List<String>, entryName: String, fullName: String): String? {
-        val classBytes = DexToJar.readFirst(jars, entryName) ?: return null
-        val singleDir = workDir.resolve("single").apply { mkdirs() }
-        val classFile = singleDir.resolve(entryName).apply {
-            parentFile.mkdirs()
-            writeBytes(classBytes)
-        }
-        val collected = ConcurrentHashMap<String, String>()
-        val driver = CfrDriver.Builder()
-            .withOptions(mapOf("showversion" to "false"))
-            .withOutputSink(collectingSinkInto(collected))
-            .build()
-        driver.analyse(listOf(classFile.absolutePath))
-        return collected[fullName] ?: "// CFR: класс $fullName не декомпилирован"
+    private fun decompileFrom(jars: List<String>, fullName: String, familyNames: Set<String>): String? {
+        val set = ClassFiles.fromJars(jars, fullName, familyNames) ?: return null
+        return ClassFiles.render(set, ClassView.CFR)
     }
 
     fun close() {

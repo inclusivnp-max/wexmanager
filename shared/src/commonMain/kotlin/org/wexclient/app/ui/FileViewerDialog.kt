@@ -172,6 +172,7 @@ fun FileViewerDialog(
     }
 
     WexWindow(
+        independent = true,
         onCloseRequest = { guard.requestClose() },
         size = androidx.compose.ui.unit.DpSize(1400.dp, 900.dp),
         title = (if (controller.isDirty) "● " else "") + entry.name,

@@ -1,5 +1,6 @@
 package org.wexclient.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,6 +38,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.CancellationException
+import org.wexclient.app.dex.ClassFamilyLimits
 import org.wexclient.app.dex.ClassFileSet
 import org.wexclient.app.dex.ClassFiles
 import org.wexclient.app.dex.ClassView
@@ -54,39 +59,54 @@ private var lastClassView = ClassView.VINEFLOWER
 /** Просмотр .class: декомпиляция тремя движками и листинг байт-кода. */
 @Composable
 fun ClassFileViewerDialog(entry: VfsEntry, vfsManager: VfsManager, onDismiss: () -> Unit) {
-    var view by remember { mutableStateOf(lastClassView) }
-    var classSet by remember { mutableStateOf<ClassFileSet?>(null) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    val texts = remember { mutableStateMapOf<ClassView, String>() }
+    var view by remember(entry.path) { mutableStateOf(lastClassView) }
+    var classSet by remember(entry.path) { mutableStateOf<ClassFileSet?>(null) }
+    var loadError by remember(entry.path) { mutableStateOf<String?>(null) }
+    val texts = remember(entry.path) { mutableStateMapOf<Pair<String, ClassView>, String>() }
+    var selectedName by remember(entry.path) { mutableStateOf<String?>(null) }
+    var pickerOpen by remember(entry.path) { mutableStateOf(false) }
+    var selectionMade by remember(entry.path) { mutableStateOf(false) }
+    val renderGate = remember(entry.path) { Mutex() }
+
+    fun dismissPicker() { if (selectionMade) pickerOpen = false else onDismiss() }
     val toast = rememberToastState()
 
     LaunchedEffect(entry.path) {
-        withContext(Dispatchers.IO) {
-            try {
-                classSet = ClassFiles.load(
+        try {
+            val loaded = withContext(Dispatchers.IO) {
+                ClassFiles.load(
                     entry.path,
-                    readBytes = { vfsManager.readBytesLimited(it, 64 shl 20) },
+                    readBytes = { vfsManager.readBytesLimited(it, ClassFamilyLimits.MAX_BYTES) },
                     listDir = { dir -> vfsManager.listEntries(dir).filter { !it.isDirectory }.map { it.path } }
-                )
-            } catch (e: Exception) {
-                loadError = e.message ?: e.javaClass.simpleName
+                ).also { it.family }
             }
+            classSet = loaded
+            selectedName = loaded.mainName
+            pickerOpen = loaded.family.isSplit
+            selectionMade = !pickerOpen
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            loadError = e.message ?: e.javaClass.simpleName
         }
     }
-    LaunchedEffect(classSet, view) {
+    LaunchedEffect(classSet, selectedName, view, selectionMade) {
         val set = classSet ?: return@LaunchedEffect
-        if (view in texts) return@LaunchedEffect
-        texts[view] = withContext(Dispatchers.IO) { ClassFiles.render(set, view) }
+        val name = selectedName ?: return@LaunchedEffect
+        if (!selectionMade || (name to view) in texts) return@LaunchedEffect
+        texts[name to view] = renderGate.withLock {
+            withContext(Dispatchers.IO) { ClassFiles.render(set.forClass(name), view) }
+        }
     }
 
-    val info = classSet?.info
-    val text = texts[view]
+    val info = selectedName?.let { classSet?.infoOf(it) }
+    val text = selectedName?.let { texts[it to view] }
+    val split = classSet?.family?.isSplit == true
 
     WexWindow(
         onCloseRequest = onDismiss,
-        onKeyEvent = latestKeyHandler { closeOnEscape(it, onDismiss) },
+        onKeyEvent = latestKeyHandler { closeOnEscape(it) { if (pickerOpen) dismissPicker() else onDismiss() } },
         size = DpSize(1400.dp, 900.dp),
-        title = entry.name
+        title = info?.let { "${it.simpleName}.class" } ?: entry.name
     ) {
         org.wexclient.app.theme.NoctaliaTheme {
             Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
@@ -99,9 +119,9 @@ fun ClassFileViewerDialog(entry: VfsEntry, vfsManager: VfsManager, onDismiss: ()
                             ) {
                                 Icon(Icons.Default.Coffee, contentDescription = null, tint = ClassFileTint, modifier = Modifier.size(22.dp))
                                 Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
+                                Column(modifier = Modifier.weight(1f).then(if (split) Modifier.clickable { pickerOpen = true } else Modifier)) {
                                     Text(
-                                        text = entry.name,
+                                        text = (info?.let { "${it.simpleName}.class" } ?: entry.name) + if (split) " ▾" else "",
                                         style = MaterialTheme.typography.titleMedium.copy(
                                             fontWeight = FontWeight.Bold,
                                             fontFamily = AppFonts.JetBrainsMono
@@ -135,7 +155,7 @@ fun ClassFileViewerDialog(entry: VfsEntry, vfsManager: VfsManager, onDismiss: ()
                                 Spacer(modifier = Modifier.width(12.dp))
                                 IconButton(
                                     onClick = {
-                                        val current = texts[view] ?: return@IconButton
+                                        val current = text ?: return@IconButton
                                         org.wexclient.app.util.TextClipboard.copy(current)
                                         toast.success("Скопировано: ${view.title}")
                                     },
@@ -165,7 +185,7 @@ fun ClassFileViewerDialog(entry: VfsEntry, vfsManager: VfsManager, onDismiss: ()
                                         color = MaterialTheme.colorScheme.outline
                                     )
                                 }
-                                else -> key(view) {
+                                else -> key(view, selectedName) {
                                     val simple = info?.simpleName ?: entry.name.substringBeforeLast('.')
                                     CodeEditorView(
                                         initialText = text,
@@ -176,6 +196,24 @@ fun ClassFileViewerDialog(entry: VfsEntry, vfsManager: VfsManager, onDismiss: ()
                                 }
                             }
                         }
+                    }
+                    if (pickerOpen) classSet?.let { set ->
+                        val family = set.family
+                        ClassFamilyDialog(
+                            name = set.infoOf(family.root).className,
+                            members = family.members.map { name ->
+                                ClassFamilyItem(name, set.infoOf(name).simpleName, set.infoOf(name).className)
+                            },
+                            partHint = "Выберите часть или откройте класс со всеми вложенными.",
+                            onPart = { name -> selectedName = name; selectionMade = true; pickerOpen = false },
+                            onWhole = {
+                                selectedName = family.root
+                                if (view == ClassView.BYTECODE) { view = ClassView.VINEFLOWER; lastClassView = view }
+                                selectionMade = true
+                                pickerOpen = false
+                            },
+                            onDismiss = ::dismissPicker
+                        )
                     }
                     ToastHost(toast)
                 }

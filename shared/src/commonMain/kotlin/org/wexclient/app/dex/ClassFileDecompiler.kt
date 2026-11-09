@@ -12,6 +12,10 @@ import org.jetbrains.java.decompiler.main.decompiler.BaseDecompiler
 import org.jetbrains.java.decompiler.main.extern.IFernflowerLogger
 import org.jetbrains.java.decompiler.main.extern.IFernflowerPreferences
 import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.ClassWriter
+import java.util.zip.ZipFile
+import org.wexclient.app.util.readUpTo
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.util.Textifier
 import org.objectweb.asm.util.TraceClassVisitor
@@ -39,7 +43,8 @@ class ClassFileInfo(
     val minor: Int,
     val access: Int,
     val superName: String?,
-    val kotlin: Boolean
+    val kotlin: Boolean,
+    val enclosingName: String? = null
 ) {
     val className: String get() = internalName.replace('/', '.')
     val simpleName: String get() = internalName.substringAfterLast('/')
@@ -66,14 +71,25 @@ class ClassFileInfo(
  * Открытый класс и его «семья» из той же папки: собственные вложенные классы (Foo$1, Foo$Bar)
  * декомпилируются вместе с ним, внешний класс и соседние вложенные — только как контекст.
  */
-class ClassFileSet(val info: ClassFileInfo, val classes: Map<String, ByteArray>) {
+class ClassFileSet(
+    val info: ClassFileInfo,
+    val classes: Map<String, ByteArray>,
+    private val knownInfo: Map<String, ClassFileInfo>? = null
+) {
     val mainName: String get() = info.internalName
-
-    fun isOwn(name: String) = name == mainName || name.startsWith("$mainName$")
+    private val metadata by lazy { knownInfo ?: classes.mapValues { (name, bytes) -> if (name == mainName) info else ClassFiles.info(bytes) } }
+    internal val familyIndex by lazy { ClassFamilyIndex(classes.keys, { it }) { metadata.getValue(it).enclosingName } }
+    internal val family: ClassFamily<String> get() = familyIndex.familyOf(mainName)
+    fun infoOf(name: String): ClassFileInfo = metadata.getValue(name)
+    fun forClass(name: String) = ClassFileSet(infoOf(name), classes, metadata)
+    fun isOwn(name: String) = familyIndex.isWithin(name, mainName)
+    internal val sourceRoots: List<String> get() {
+        val owned = classes.keys.filter(::isOwn).toSet()
+        return listOf(mainName) + owned.filter { it != mainName && infoOf(it).enclosingName !in owned }.sorted()
+    }
 }
 
 object ClassFiles {
-    private const val MAX_FAMILY = 500
 
     /** CAFEBABE и правдоподобная версия (у fat-бинарников Mach-O там число архитектур). */
     fun isClassFile(head: ByteArray): Boolean {
@@ -91,13 +107,22 @@ object ClassFiles {
         } catch (e: Exception) {
             throw IOException("Повреждённый class-файл: ${e.message ?: e.javaClass.simpleName}")
         }
+        var enclosing: String? = null
+        reader.accept(object : ClassVisitor(Opcodes.ASM9) {
+            override fun visitOuterClass(owner: String, name: String?, descriptor: String?) { enclosing = owner }
+            override fun visitInnerClass(name: String, outerName: String?, innerName: String?, access: Int) {
+                if (name == reader.className && outerName != null) enclosing = outerName
+            }
+            override fun visitNestHost(nestHost: String) { if (enclosing == null) enclosing = nestHost }
+        }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
         return ClassFileInfo(
             internalName = reader.className,
             major = ((bytes[6].toInt() and 0xFF) shl 8) or (bytes[7].toInt() and 0xFF),
             minor = ((bytes[4].toInt() and 0xFF) shl 8) or (bytes[5].toInt() and 0xFF),
             access = reader.access,
             superName = reader.superName,
-            kotlin = String(bytes, Charsets.ISO_8859_1).contains("Lkotlin/Metadata;")
+            kotlin = String(bytes, Charsets.ISO_8859_1).contains("Lkotlin/Metadata;"),
+            enclosingName = enclosing
         )
     }
 
@@ -108,7 +133,7 @@ object ClassFiles {
         val classes = LinkedHashMap<String, ByteArray>()
         classes[info.internalName] = bytes
         val fileName = path.fileName?.toString().orEmpty()
-        val top = fileName.substringBeforeLast('.').substringBefore('$')
+        val top = info.simpleName.substringBefore('$')
         val parent = path.parent
         if (parent != null && top.isNotEmpty()) {
             val family = runCatching { listDir(parent) }.getOrDefault(emptyList())
@@ -118,15 +143,96 @@ object ClassFiles {
                         (n.substringBeforeLast('.') == top || n.startsWith("$top$"))
                 }
                 .sortedBy { it.fileName.toString() }
-                .take(MAX_FAMILY)
+            if (family.size + 1 > ClassFamilyLimits.MAX_MEMBERS) throw IOException("Слишком много частей класса: ${family.size + 1}")
+            var totalBytes = bytes.size
             for (p in family) {
                 val b = runCatching { readBytes(p) }.getOrNull() ?: continue
                 if (!isClassFile(b)) continue
                 val name = runCatching { ClassReader(b).className }.getOrNull() ?: continue
+                totalBytes += b.size
+                if (totalBytes > ClassFamilyLimits.MAX_BYTES) throw IOException("Части класса занимают больше 64 МБ")
                 classes.putIfAbsent(name, b)
             }
         }
         return ClassFileSet(info, classes)
+    }
+
+    /** Контекст всей семьи из всех DEX-jar, а не один файл без вложенных классов. */
+    internal fun fromJars(jars: List<String>, mainName: String, contextNames: Set<String> = emptySet()): ClassFileSet? {
+        val internal = mainName.replace('.', '/')
+        val top = internal.substringBefore('$')
+        val wanted = contextNames.map { it.replace('.', '/') }.toSet()
+        val classes = LinkedHashMap<String, ByteArray>()
+        var total = 0
+        for (jar in jars) ZipFile(jar).use { zip ->
+            val entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory || !entry.name.endsWith(".class")) continue
+                val name = entry.name.removeSuffix(".class")
+                if (name != internal && name != top && !name.startsWith("$top$") && name !in wanted) continue
+                if (name in classes) continue
+                if (classes.size >= ClassFamilyLimits.MAX_MEMBERS) throw IOException("Слишком много частей класса")
+                val budget = ClassFamilyLimits.MAX_BYTES - total
+                if (entry.size > budget) throw IOException("Части класса занимают больше 64 МБ")
+                val bytes = zip.getInputStream(entry).use { it.readUpTo(budget + 1) }
+                if (bytes.size > budget) throw IOException("Части класса занимают больше 64 МБ")
+                val found = info(bytes).internalName
+                if (found != name) continue
+                total += bytes.size
+                classes[name] = bytes
+            }
+        }
+        val main = classes[internal] ?: return null
+        return ClassFileSet(info(main), completeMemberTables(classes))
+    }
+
+    /** DEX может хранить связь только у дочернего класса; CFR нужен список и у владельца. */
+    private fun completeMemberTables(classes: Map<String, ByteArray>): Map<String, ByteArray> {
+        data class Member(val name: String, val owner: String, val simple: String?, val access: Int)
+        val members = ArrayList<Member>()
+        for ((own, bytes) in classes) {
+            var enclosing: String? = null
+            var inMethod = false
+            var self: Member? = null
+            ClassReader(bytes).accept(object : ClassVisitor(Opcodes.ASM9) {
+                override fun visitOuterClass(owner: String, name: String?, descriptor: String?) {
+                    enclosing = owner
+                    inMethod = name != null
+                }
+                override fun visitInnerClass(name: String, outerName: String?, innerName: String?, access: Int) {
+                    if (name == own) self = Member(name, outerName.orEmpty(), innerName, access)
+                }
+            }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+            self?.let { entry ->
+                val owner = entry.owner.ifEmpty { if (!inMethod && entry.simple != null) enclosing.orEmpty() else "" }
+                if (owner in classes) members.add(entry.copy(owner = owner))
+            }
+        }
+        val byOwner = members.groupBy { it.owner }
+        val byName = members.associateBy { it.name }
+        return classes.mapValues { (name, bytes) ->
+            val children = byOwner[name].orEmpty()
+            if (children.isEmpty() && name !in byName) return@mapValues bytes
+            val reader = ClassReader(bytes)
+            val writer = ClassWriter(reader, 0)
+            val existing = HashSet<String>()
+            reader.accept(object : ClassVisitor(Opcodes.ASM9, writer) {
+                override fun visitInnerClass(name: String, outerName: String?, innerName: String?, access: Int) {
+                    existing.add(name)
+                    val known = byName[name]
+                    super.visitInnerClass(name, known?.owner ?: outerName, innerName, access)
+                }
+                override fun visitOuterClass(owner: String, method: String?, descriptor: String?) {
+                    if (method != null || name !in byName) super.visitOuterClass(owner, method, descriptor)
+                }
+                override fun visitEnd() {
+                    children.filter { it.name !in existing }.forEach { super.visitInnerClass(it.name, it.owner, it.simple, it.access) }
+                    super.visitEnd()
+                }
+            }, 0)
+            writer.toByteArray()
+        }
     }
 
     fun render(set: ClassFileSet, view: ClassView): String {
@@ -168,8 +274,11 @@ object ClassFiles {
                 if (set.isOwn(name)) decompiler.addSource(file) else decompiler.addLibrary(file)
             }
             decompiler.decompileContext()
-            saver.classes[set.mainName] ?: saver.classes[set.info.className]
-                ?: "// Vineflower: класс ${set.info.className} не декомпилирован\n"
+            val code = saver.classes[set.mainName] ?: saver.classes[set.info.className]
+                ?: return@withClassFiles "// Vineflower: класс ${set.info.className} не декомпилирован\n"
+            val extra = saver.classes.entries.filter { (name, _) -> name != set.mainName && name != set.info.className && set.isOwn(name.replace('.', '/')) }
+                .sortedBy { it.key }.map { it.key to it.value }
+            joinClassSources(listOf(set.info.className to code) + extra)
         } finally {
             runCatching { saver.close() }
         }
@@ -181,17 +290,20 @@ object ClassFiles {
             .withOptions(mapOf("showversion" to "false", "hideutf" to "false"))
             .withOutputSink(CfrEngine.collectingSinkInto(collected))
             .build()
-            .analyse(listOf(files.getValue(set.mainName).absolutePath))
-        collected[set.info.className] ?: collected.values.firstOrNull()
-            ?: "// CFR: класс ${set.info.className} не декомпилирован\n"
+            .analyse(set.sourceRoots.map { files.getValue(it).absolutePath })
+        val code = collected[set.info.className] ?: return@withClassFiles "// CFR: класс ${set.info.className} не декомпилирован\n"
+        val extra = collected.entries.filter { (name, _) -> name != set.info.className && set.isOwn(name.replace('.', '/')) }.sortedBy { it.key }.map { it.key to it.value }
+        joinClassSources(listOf(set.info.className to code) + extra)
     }
 
     private fun procyon(set: ClassFileSet): String {
         val settings = DecompilerSettings.javaDefaults()
         settings.typeLoader = CompositeTypeLoader(MapTypeLoader(set.classes), ClasspathTypeLoader())
-        val out = StringWriter()
-        Decompiler.decompile(set.mainName, PlainTextOutput(out), settings)
-        return out.toString()
+        return joinClassSources(set.sourceRoots.map { name ->
+            val out = StringWriter()
+            Decompiler.decompile(name, PlainTextOutput(out), settings)
+            name.replace('/', '.') to out.toString()
+        })
     }
 
     private class MapTypeLoader(private val classes: Map<String, ByteArray>) : ITypeLoader {

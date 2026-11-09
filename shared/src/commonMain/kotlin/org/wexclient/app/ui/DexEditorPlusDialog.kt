@@ -75,7 +75,10 @@ import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
+import org.wexclient.app.dex.DexSearchMode
 import org.wexclient.app.dex.DexPackageNode
+import org.wexclient.app.dex.ClassFamily
+import org.wexclient.app.dex.ClassFamilyIndex
 
 @Composable
 fun DexEditorPlusDialog(
@@ -108,6 +111,8 @@ fun DexEditorPlusDialog(
     var editedCount by remember { mutableStateOf(0) }
     var savingDex by remember { mutableStateOf(false) }
     var pendingSelect by remember { mutableStateOf<DexClassNode?>(null) }
+    var pendingEditorTab by remember { mutableStateOf<Int?>(null) }
+    var familyChoice by remember(engine) { mutableStateOf<ClassFamily<DexClassNode>?>(null) }
     var askClose by remember { mutableStateOf(false) }
     var closeError by remember { mutableStateOf<String?>(null) }
     val canWriteDex = onSaveDex != null && engine.canSave
@@ -125,9 +130,20 @@ fun DexEditorPlusDialog(
     }
 
     /** Выбор класса: несобранные правки smali не теряем молча. */
-    fun selectClass(node: DexClassNode) {
-        if (node == selectedClass) return
-        if (smaliController.isDirty) pendingSelect = node else selectedClass = node
+    fun selectClass(node: DexClassNode, tab: Int? = null) {
+        if (node == selectedClass) { tab?.let { editorTab = it }; return }
+        if (smaliController.isDirty) {
+            pendingSelect = node
+            pendingEditorTab = tab
+        } else {
+            selectedClass = node
+            tab?.let { editorTab = it }
+        }
+    }
+
+    fun openClass(node: DexClassNode) {
+        val family = engine.classFamilies.familyOf(node)
+        if (family.isSplit) familyChoice = family else selectClass(node)
     }
 
     /** null — собрано; иначе текст ошибок smali. */
@@ -195,7 +211,7 @@ fun DexEditorPlusDialog(
     }
 
     val visibleTreeRows = remember(rootPackageNode, expandedPackages) {
-        flattenDexTree(rootPackageNode, expandedPackages)
+        flattenDexTree(rootPackageNode, expandedPackages, engine.classFamilies)
     }
 
     // Поиск — после паузы в наборе и в фоне: по методам, полям и строкам большого DEX это от 100 мс
@@ -206,7 +222,15 @@ fun DexEditorPlusDialog(
             return@produceState
         }
         kotlinx.coroutines.delay(150)
-        value = withContext(Dispatchers.Default) { engine.search(searchQuery, searchMode) }
+        value = withContext(Dispatchers.Default) {
+            val found = engine.search(searchQuery, searchMode)
+            if (searchMode != DexSearchMode.CLASSES) found else found.distinctBy { result ->
+                result.classNode?.let { engine.classFamilies.familyOf(it).root.fullName }
+            }.map { result ->
+                val family = result.classNode?.let { engine.classFamilies.familyOf(it) }
+                if (family == null) result else result.copy(title = family.root.simpleName, classNode = family.root)
+            }
+        }
     }
 
     // Фоновый прогрев трансляции DEX -> jar, чтобы вкладки CFR/VF открывались без задержки
@@ -483,7 +507,7 @@ fun DexEditorPlusDialog(
                                                 .padding(vertical = 1.dp)
                                                 .clickable {
                                                     if (res.classNode != null) {
-                                                        selectClass(res.classNode)
+                                                        if (searchMode == DexSearchMode.CLASSES) openClass(res.classNode) else selectClass(res.classNode)
                                                         expandedPackages = expandedPackages + engine.getAncestorPathsForClass(res.classNode, compactMode)
                                                     }
                                                 },
@@ -688,7 +712,8 @@ fun DexEditorPlusDialog(
                                             }
                                             is DexTreeRow.ClassRow -> {
                                                 val cls = item.classNode
-                                                val isSelected = cls == selectedClass
+                                                val family = engine.classFamilies.familyOf(cls)
+                                                val isSelected = selectedClass?.let { engine.classFamilies.familyOf(it).root } == cls
                                                 val rowBg = if (isSelected) NoctaliaPrimary.copy(alpha = 0.2f) else Color.Transparent
                                                 val rowBorder = if (isSelected) BorderStroke(1.dp, NoctaliaPrimary.copy(alpha = 0.6f)) else null
 
@@ -696,7 +721,7 @@ fun DexEditorPlusDialog(
                                                     modifier = motion
                                                         .fillMaxWidth()
                                                         .padding(vertical = 1.dp)
-                                                        .clickable { selectClass(cls) },
+                                                        .clickable { openClass(cls) },
                                                     color = rowBg,
                                                     shape = RoundedCornerShape(4.dp),
                                                     border = rowBorder
@@ -714,7 +739,7 @@ fun DexEditorPlusDialog(
                                                         Spacer(modifier = Modifier.width(6.dp))
 
                                                         Text(
-                                                            text = cls.simpleName,
+                                                            text = cls.simpleName + if (family.isSplit) " · ${family.members.size}" else "",
                                                             style = MaterialTheme.typography.bodySmall.copy(
                                                                 fontFamily = AppFonts.JetBrainsMono,
                                                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
@@ -822,6 +847,23 @@ fun DexEditorPlusDialog(
             ToastHost(toast)
             }
 
+            familyChoice?.let { family ->
+                ClassFamilyDialog(
+                    name = family.root.fullName,
+                    members = family.members.map { ClassFamilyItem(it.fullName, it.simpleName, it.dexSourceName) },
+                    partHint = "Отдельная часть откроется в Smali, весь класс — в Java.",
+                    onPart = { name ->
+                        familyChoice = null
+                        selectClass(family.members.first { it.fullName == name }, 0)
+                    },
+                    onWhole = {
+                        familyChoice = null
+                        selectClass(family.root, if (editorTab in 1..4) editorTab else 1)
+                    },
+                    onDismiss = { familyChoice = null }
+                )
+            }
+
             pendingSelect?.let { next ->
                 UnsavedChangesDialog(
                     fileName = "${selectedClass?.simpleName ?: "класс"}.smali",
@@ -833,14 +875,18 @@ fun DexEditorPlusDialog(
                         if (compileSmaliNow() == null) {
                             pendingSelect = null
                             selectedClass = next
+                            pendingEditorTab?.let { editorTab = it }
+                            pendingEditorTab = null
                         }
                     },
                     onDiscard = {
                         pendingSelect = null
                         smaliController.reset(smaliCode)
                         selectedClass = next
+                        pendingEditorTab?.let { editorTab = it }
+                        pendingEditorTab = null
                     },
-                    onCancel = { pendingSelect = null }
+                    onCancel = { pendingSelect = null; pendingEditorTab = null }
                 )
             }
 
@@ -895,9 +941,10 @@ sealed interface DexTreeRow {
     }
 }
 
-private fun flattenDexTree(
+internal fun flattenDexTree(
     root: DexPackageNode,
-    expandedPackages: Set<String>
+    expandedPackages: Set<String>,
+    families: ClassFamilyIndex<DexClassNode>? = null
 ): List<DexTreeRow> {
     val result = ArrayList<DexTreeRow>()
 
@@ -911,6 +958,7 @@ private fun flattenDexTree(
             }
             // Classes second
             for (cls in pkg.classes) {
+                if (families != null && !families.isRoot(cls)) continue
                 result.add(DexTreeRow.ClassRow(cls, level = level + 1))
             }
         }
@@ -923,6 +971,7 @@ private fun flattenDexTree(
 
     // Root-level classes LAST
     for (cls in root.classes) {
+        if (families != null && !families.isRoot(cls)) continue
         result.add(DexTreeRow.ClassRow(cls, level = 0))
     }
 

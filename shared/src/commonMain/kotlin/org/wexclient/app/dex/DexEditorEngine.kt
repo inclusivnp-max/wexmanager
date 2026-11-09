@@ -9,6 +9,8 @@ import kotlinx.coroutines.sync.Mutex
 import org.jf.dexlib2.Opcodes
 import org.jf.dexlib2.dexbacked.DexBackedDexFile
 import org.jf.dexlib2.iface.ClassDef
+import org.jf.dexlib2.iface.value.TypeEncodedValue
+import org.jf.dexlib2.iface.value.MethodEncodedValue
 import java.io.File
 
 data class DexSource(
@@ -93,6 +95,18 @@ class DexEditorEngine(
             )
         }
     }.distinctBy { it.fullName }.sortedBy { it.fullName }
+
+    internal val classFamilies = ClassFamilyIndex(classes, DexClassNode::fullName) { node ->
+        node.classDef.annotations.firstNotNullOfOrNull { annotation ->
+            when (annotation.type) {
+                "Ldalvik/annotation/EnclosingClass;" -> annotation.elements.firstOrNull { it.name == "value" }
+                    ?.value?.let { (it as? TypeEncodedValue)?.value }?.let(::cleanDescriptor)
+                "Ldalvik/annotation/EnclosingMethod;" -> annotation.elements.firstOrNull { it.name == "value" }
+                    ?.value?.let { (it as? MethodEncodedValue)?.value?.definingClass }?.let(::cleanDescriptor)
+                else -> null
+            }
+        }
+    }
 
     val packageTreeCompact: DexPackageNode by lazy {
         buildPackageTree(classes, compact = true)
@@ -371,9 +385,21 @@ class DexEditorEngine(
         try {
             ensureRebuilt()
             val jadx = getJadx()
-            val jClass = jadx.classes.firstOrNull { it.fullName == classNode.fullName }
+            val jClass = jadx.classes.firstOrNull { it.rawName == classNode.fullName }
+                ?: jadx.searchJavaClassByOrigFullName(classNode.fullName.replace('$', '.'))
             if (jClass != null) {
-                jClass.code
+                val code = jClass.code
+                val family = classFamilies.familyOf(classNode)
+                if (!family.isSplit || family.root != classNode) code else {
+                    val names = family.members.map { it.fullName }.toSet()
+                    val parts = linkedMapOf(jClass.rawName to code)
+                    for (candidate in jadx.classes) {
+                        if (candidate.rawName !in names) continue
+                        val owner = candidate.topParentClass
+                        if (owner.rawName in names && owner.rawName !in parts) parts[owner.rawName] = owner.code
+                    }
+                    joinClassSources(parts.entries.map { it.key to it.value })
+                }
             } else {
                 "// Класс ${classNode.fullName} не найден в декомпиляторе JADX"
             }
@@ -409,7 +435,7 @@ class DexEditorEngine(
         try {
             ensureRebuilt()
             val engine = synchronized(this) { cfrEngine ?: CfrEngine(sources, jarCache).also { cfrEngine = it } }
-            engine.decompileToJava(classNode.fullName)
+            engine.decompileToJava(classNode.fullName, classFamilies.familyOf(classNode).members.map { it.fullName }.toSet())
         } catch (e: Exception) {
             "// Ошибка декомпиляции CFR: ${e.message}\n" + e.stackTraceToString()
         }
@@ -422,7 +448,7 @@ class DexEditorEngine(
         try {
             ensureRebuilt()
             val engine = synchronized(this) { vineflowerEngine ?: VineflowerEngine(sources, jarCache).also { vineflowerEngine = it } }
-            engine.decompileToJava(classNode.fullName)
+            engine.decompileToJava(classNode.fullName, classFamilies.familyOf(classNode).members.map { it.fullName }.toSet())
         } catch (e: Exception) {
             "// Ошибка декомпиляции Vineflower: ${e.message}\n" + e.stackTraceToString()
         }
@@ -435,7 +461,7 @@ class DexEditorEngine(
         try {
             ensureRebuilt()
             val engine = synchronized(this) { procyonEngine ?: ProcyonEngine(sources, jarCache).also { procyonEngine = it } }
-            engine.decompileToJava(classNode.fullName)
+            engine.decompileToJava(classNode.fullName, classFamilies.familyOf(classNode).members.map { it.fullName }.toSet())
         } catch (e: Exception) {
             "// Ошибка декомпиляции Procyon: ${e.message}\n" + e.stackTraceToString()
         }

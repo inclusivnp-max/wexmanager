@@ -1,7 +1,5 @@
 package org.wexclient.app.dex
 
-import org.jetbrains.java.decompiler.main.decompiler.BaseDecompiler
-import org.jetbrains.java.decompiler.main.extern.IFernflowerLogger
 import org.jetbrains.java.decompiler.main.extern.IFernflowerPreferences
 import org.jetbrains.java.decompiler.main.extern.IResultSaver
 import java.util.concurrent.ConcurrentHashMap
@@ -30,16 +28,16 @@ class VineflowerEngine(
     // Имя класса с точками -> Java
     private val javaByClass = ConcurrentHashMap<String, String>()
 
-    fun decompileToJava(fullName: String): String {
+    fun decompileToJava(fullName: String, familyNames: Set<String> = emptySet()): String {
         val key = fullName.replace('/', '.')
         javaByClass[key]?.let { return it }
         return try {
             // Трансляция DEX -> jar одна на всех (дальше из кэша), Vineflower — только на этом классе
             val entryName = fullName.replace('.', '/') + ".class"
-            val first = decompileFrom(cache.jarsFor(entryName), entryName, fullName, key)
+            val first = decompileFrom(cache.jarsFor(entryName), fullName, familyNames)
                 ?: return "// Vineflower: класс $fullName не найден в транслированном jar"
             val java = DexToJar.secondOpinion(first, FAILED) {
-                cache.alternativeJarsFor(entryName)?.let { decompileFrom(it, entryName, fullName, key) }
+                cache.alternativeJarsFor(entryName)?.let { decompileFrom(it, fullName, familyNames) }
             }
             javaByClass[key] = java
             java
@@ -49,35 +47,9 @@ class VineflowerEngine(
     }
 
     /** Java класса из первого jar, где он есть; null — ни в одном. */
-    private fun decompileFrom(jars: List<String>, entryName: String, fullName: String, key: String): String? {
-        val classBytes = DexToJar.readFirst(jars, entryName) ?: return null
-        val saver = CollectingSaver()
-        // Своя папка на каждый вызов: в общей копились все открытые раньше классы, и Vineflower
-        // заново разбирал их все (N-й класс — N декомпиляций), а временные файлы только росли
-        val dir = java.nio.file.Files.createTempDirectory(workDir.toPath(), "single-").toFile()
-        try {
-            dir.resolve(entryName).apply {
-                parentFile.mkdirs()
-                writeBytes(classBytes)
-            }
-            val decompiler = BaseDecompiler(saver, options(), IFernflowerLogger.NO_OP)
-            decompiler.addSource(dir)
-            decompiler.decompileContext()
-
-            // Одна запись на класс; имя приводится к нотации с точками
-            val out = saver.classes.mapKeys { it.key.replace('/', '.') }
-            out[key]?.let { return it }
-            // Запасной вариант для вложенных классов с другой нотацией имени
-            val simple = fullName.substringAfterLast('.')
-            out.entries.firstOrNull { (k, _) -> k.substringAfterLast('.') == simple }?.let { return it.value }
-            return "// Vineflower: класс $fullName не декомпилирован"
-        } finally {
-            try {
-                saver.close()
-            } catch (_: Exception) {
-            }
-            runCatching { org.wexclient.app.util.FileTree.delete(dir) }
-        }
+    private fun decompileFrom(jars: List<String>, fullName: String, familyNames: Set<String>): String? {
+        val set = ClassFiles.fromJars(jars, fullName, familyNames) ?: return null
+        return ClassFiles.render(set, ClassView.VINEFLOWER)
     }
 
     fun close() {

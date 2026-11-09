@@ -13,6 +13,17 @@ class FileLocationStateTest {
         val vfs = VfsManager();val state = FilePaneState(vfs, home)
         try { block(vfs, home, folder, state) } finally { state.dispose();vfs.closeAll();home.toFile().deleteRecursively() }
     }
+    @Test fun `repeated reveal reuses visible entries without waiting for disk`() = fixture { _, _, folder, state ->
+        state.navigateTo(folder)
+        val target = folder.resolve("file-035.txt")
+        val before = state.entries.first { it.path == target }
+        repeat(20) {
+            state.revealFile(target)
+            assertSame(before, state.entries.first { it.path == target })
+            assertEquals(listOf(target), state.selectedEntries.map { it.path })
+            assertFalse(state.isLoading)
+        }
+    }
     @Test fun `opening location selects only the requested file and requests an immediate jump`() = fixture { _, _, folder, state ->
         val target = folder.resolve("file-035.txt")
         state.revealFile(target)

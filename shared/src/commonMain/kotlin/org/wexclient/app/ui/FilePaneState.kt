@@ -169,6 +169,10 @@ class FilePaneState(
     fun revealFile(file: Path) {
         val target = vfsManager.live(file.toAbsolutePath().normalize())
         val parent = target.parent ?: return
+        // Повторный переход не перечитывает уже показанную папку и не пересоздаёт её строки.
+        // Сверка с диском ниже идёт отдельно: редактор не ждёт её в потоке окна.
+        val reuse = currentPath == parent && !listing && listedPath == parent.toString() &&
+            searchQuery.isBlank() && typeFilter == TypeFilter.ALL && entries.any { it.path == target }
         val version = ++revealVersion
         revealedFile = target
         arrivedNames = emptySet()
@@ -178,7 +182,11 @@ class FilePaneState(
         searchQuery = ""
         typeFilter = TypeFilter.ALL
         clearSelection()
-        if (currentPath == parent) refresh() else navigateTo(parent)
+        if (!reuse) {
+            if (currentPath == parent) refresh() else navigateTo(parent)
+        } else {
+            revalidateSoon(parent)
+        }
         val navigation = navigationId
         whenLoaded {
             if (version != revealVersion || navigation != navigationId || currentPath != parent) return@whenLoaded
@@ -411,8 +419,11 @@ class FilePaneState(
      * Список показан из кэша: имена те же (время изменения папки не сдвинулось), но файл могли переписать
      * на месте — сверяем с диском в фоне, когда отрисуется первый кадр новой папки.
      */
+    private var revalidateJob: kotlinx.coroutines.Job? = null
+
     private fun revalidateSoon(path: Path) {
-        searchScope.launch {
+        revalidateJob?.cancel()
+        revalidateJob = searchScope.launch {
             kotlinx.coroutines.delay(REVALIDATE_DELAY_MS)
             if (path == currentPath) onExternalChange(path)
         }

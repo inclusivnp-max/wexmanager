@@ -5,6 +5,20 @@ import java.nio.file.Files
 import kotlin.test.*
 
 class EditorWindowRoutingTest {
+    @Test fun `embedded viewer raises its owner without adding windows or pending opens`() {
+        WexWindows.openManager(null)
+        val manager = WexWindows.managers.last()
+        val count = WexWindows.managers.size
+        try {
+            WexWindows.raiseManager(manager.id)
+            assertEquals(manager.id, WexWindows.raise)
+            assertEquals(count, WexWindows.managers.size)
+            assertNull(WexWindows.pendingFor(manager.id))
+            WexWindows.raised(manager.id)
+            WexWindows.raiseManager(-1)
+            assertNull(WexWindows.raise)
+        } finally { WexWindows.close(manager) }
+    }
     @Test fun `equivalent file paths reuse the existing editor window`() {
         val dir = Files.createTempDirectory("wex-editor-route-")
         val file = dir.resolve("sample.txt")

@@ -93,6 +93,12 @@ object WexWindows {
         editors.remove(window)
     }
 
+    /** Поднять владельца просмотрщика, не создавая ещё одно окно или вкладку. */
+    @Synchronized
+    fun raiseManager(id: Int) {
+        if (managers.any { it.id == id }) raise = id
+    }
+
     @Synchronized
     fun raised(id: Int) {
         if (raise == id) raise = null
